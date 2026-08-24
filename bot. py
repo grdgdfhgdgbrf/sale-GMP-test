@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
 class Config:
-    BOT_TOKEN = "8553271912:AAEKVRL2bwjY3RO4X9cS7ITeDQ_PfBLfpKc"
+    BOT_TOKEN = "8918094777:AAH6bDZoH8PcSnuj0STi8ycKu7zk8HSHFz8"
     ADMIN_ID = 5356400377
 
     CHANNEL_LINK = "https://t.me/gmp_owner"
@@ -39,7 +39,7 @@ class Config:
     BOT_USERNAME = "@Sale_gmpbot"
 
     # Crypto Pay API
-    CRYPTO_PAY_TOKEN = "625986:AABMjC0XHKb1loGbsSz62MxG4sJ2bovBXBV"
+    CRYPTO_PAY_TOKEN = "521377:AAx2ftqZQuV65i7lPPaJHbSlYe8zN8p4LGT"
     CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 
     # Начальные значения (будут перезаписаны из БД при запуске)
@@ -50,6 +50,7 @@ class Config:
 
     # Курс криптовалюты (сколько GMP за 1 USD)
     CRYPTO_RATE = 1.5
+    CRYPTO_ASSET = "USDT"  # валюта для оплаты (USDT, BTC, ETH и т.д.)
 
     CARD_NUMBER = "0"
     PHONE_NUMBER = "+7 920 008 91 84"
@@ -221,7 +222,8 @@ class Database:
             'BANK_NAME': Config.BANK_NAME,
             'RECIPIENT_NAME': Config.RECIPIENT_NAME,
             'TOTAL_GMP_AVAILABLE': str(Config.TOTAL_GMP_AVAILABLE),
-            'CRYPTO_RATE': str(Config.CRYPTO_RATE)
+            'CRYPTO_RATE': str(Config.CRYPTO_RATE),
+            'CRYPTO_ASSET': Config.CRYPTO_ASSET
         }
 
         for key, value in all_settings.items():
@@ -248,7 +250,8 @@ class Database:
             'BANK_NAME': Config.BANK_NAME,
             'RECIPIENT_NAME': Config.RECIPIENT_NAME,
             'TOTAL_GMP_AVAILABLE': str(Config.TOTAL_GMP_AVAILABLE),
-            'CRYPTO_RATE': str(Config.CRYPTO_RATE)
+            'CRYPTO_RATE': str(Config.CRYPTO_RATE),
+            'CRYPTO_ASSET': Config.CRYPTO_ASSET
         }
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -661,16 +664,18 @@ class CryptoPay:
             'Content-Type': 'application/json'
         }
 
-    def create_invoice(self, amount, currency='USD', description=None, paid_btn_name='openWallet'):
+    def create_invoice(self, amount, currency_code='USD', asset='USDT', description=None, paid_btn_name='openWallet'):
         """Создает инвойс для оплаты"""
         try:
             data = {
                 'amount': amount,
-                'currency': currency,
-                'paid_btn_name': paid_btn_name
+                'currency_code': currency_code,
+                'asset': asset
             }
             if description:
                 data['description'] = description
+            if paid_btn_name:
+                data['paid_btn_name'] = paid_btn_name
 
             response = requests.post(
                 f'{self.api_url}/createInvoice',
@@ -751,6 +756,7 @@ def sync_config_from_db():
         Config.MAX_CASE_REWARD = db.get_setting_int('MAX_CASE_REWARD')
         Config.TOTAL_GMP_AVAILABLE = db.get_setting_float('TOTAL_GMP_AVAILABLE')
         Config.CRYPTO_RATE = db.get_setting_float('CRYPTO_RATE')
+        Config.CRYPTO_ASSET = db.get_setting('CRYPTO_ASSET') or Config.CRYPTO_ASSET
         Config.CARD_NUMBER = db.get_setting('CARD_NUMBER') or Config.CARD_NUMBER
         Config.PHONE_NUMBER = db.get_setting('PHONE_NUMBER') or Config.PHONE_NUMBER
         Config.BANK_NAME = db.get_setting('BANK_NAME') or Config.BANK_NAME
@@ -1633,12 +1639,14 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "❌ GMP временно нет в наличии!", show_alert=True)
             return
         rate = Config.CRYPTO_RATE
+        asset = Config.CRYPTO_ASSET
         text = (
-            "💲 <b>Пополнение криптовалютой</b>\n\n"
+            f"💲 <b>Пополнение криптовалютой ({asset})</b>\n\n"
             f"💰 Курс: 1 USD = <b>{rate:.2f} GMP</b>\n"
             f"📦 Доступно GMP: <b>{available:.0f}</b>\n\n"
-            "✏️ <b>Введите сумму в USD</b>\n"
-            "(можно дробные, например 50.75)"
+            f"✏️ <b>Введите сумму в USD</b>\n"
+            "(можно дробные, например 50.75)\n\n"
+            f"💳 Валюта оплаты: <b>{asset}</b>"
         )
         try:
             bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=crypto_back_keyboard())
@@ -1827,6 +1835,7 @@ def callback_handler(call):
         max_case = Config.MAX_CASE_REWARD
         available = Config.TOTAL_GMP_AVAILABLE
         crypto_rate = Config.CRYPTO_RATE
+        crypto_asset = Config.CRYPTO_ASSET
         text = (
             "💱 <b>Настройки бота</b>\n\n"
             f"Текущие значения:\n"
@@ -1840,8 +1849,9 @@ def callback_handler(call):
             f"8 - Мин. награда кейса: {min_case} GMP\n"
             f"9 - Макс. награда кейса: {max_case} GMP\n"
             f"10 - Доступно GMP: {available:.0f}\n"
-            f"11 - Курс криптовалюты: {crypto_rate} GMP за 1 USD\n\n"
-            "Введите номер параметра для изменения (1-11):"
+            f"11 - Курс криптовалюты: {crypto_rate} GMP за 1 USD\n"
+            f"12 - Криптовалюта оплаты: {crypto_asset}\n\n"
+            "Введите номер параметра для изменения (1-12):"
         )
         try:
             bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_to_main_keyboard())
@@ -2118,6 +2128,7 @@ def callback_handler(call):
         price = Config.PRICE_PER_GMP_RUB
         available = Config.TOTAL_GMP_AVAILABLE
         crypto_rate = Config.CRYPTO_RATE
+        crypto_asset = Config.CRYPTO_ASSET
         text = (
             "📊 <b>Статистика бота</b>\n\n"
             f"👥 Пользователей: <b>{total_users}</b>\n"
@@ -2131,7 +2142,8 @@ def callback_handler(call):
             f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
             f"{divider()}\n"
             f"💰 Цена 1 GMP: <b>{price:.2f} ₽</b>\n"
-            f"💲 Курс крипты: 1 USD = <b>{crypto_rate:.2f} GMP</b>"
+            f"💲 Курс крипты: 1 USD = <b>{crypto_rate:.2f} GMP</b>\n"
+            f"💳 Криптовалюта: <b>{crypto_asset}</b>"
         )
         try:
             bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=admin_stats_keyboard())
@@ -2382,10 +2394,10 @@ def handle_admin_settings_choice(message):
         return
     try:
         choice = int(message.text.strip())
-        if choice not in range(1, 12):
+        if choice not in range(1, 13):
             raise ValueError
     except:
-        bot.send_message(chat_id, "❌ Введите число от 1 до 11.", parse_mode="HTML")
+        bot.send_message(chat_id, "❌ Введите число от 1 до 12.", parse_mode="HTML")
         return
     settings_map = {
         1: ('PRICE_PER_GMP_RUB', 'Цена 1 GMP (₽)', 'число', float),
@@ -2398,7 +2410,8 @@ def handle_admin_settings_choice(message):
         8: ('MIN_CASE_REWARD', 'Мин. награда кейса (GMP)', 'число', float),
         9: ('MAX_CASE_REWARD', 'Макс. награда кейса (GMP)', 'число', float),
         10: ('TOTAL_GMP_AVAILABLE', 'Доступно GMP', 'число', float),
-        11: ('CRYPTO_RATE', 'Курс криптовалюты (GMP за 1 USD)', 'число', float)
+        11: ('CRYPTO_RATE', 'Курс криптовалюты (GMP за 1 USD)', 'число', float),
+        12: ('CRYPTO_ASSET', 'Криптовалюта оплаты (USDT, BTC, ETH...)', 'строка', str)
     }
     key, desc, type_desc, conv = settings_map[choice]
     current = db.get_setting(key)
@@ -2418,9 +2431,14 @@ def handle_admin_settings_value(message, key, conv, desc):
     if not is_admin(user_id):
         return
     try:
-        new_val = conv(message.text.strip())
-        if new_val < 0:
-            raise ValueError
+        if conv is str:
+            new_val = message.text.strip()
+            if not new_val:
+                raise ValueError
+        else:
+            new_val = conv(message.text.strip())
+            if new_val < 0:
+                raise ValueError
     except:
         bot.send_message(chat_id, f"❌ Некорректное значение. Введите положительное {desc}.", parse_mode="HTML")
         return
@@ -2717,8 +2735,9 @@ def handle_crypto_amount(message):
             )
             bot.register_next_step_handler(message, handle_crypto_amount)
             return
-        # Создаём инвойс в Crypto Pay
-        invoice = crypto_pay.create_invoice(amount, 'USD', f"Покупка GMP для пользователя {user_id}")
+        # Создаём инвойс в Crypto Pay с указанием asset
+        asset = Config.CRYPTO_ASSET
+        invoice = crypto_pay.create_invoice(amount, 'USD', asset, f"Покупка GMP для пользователя {user_id}")
         if not invoice:
             bot.send_message(
                 chat_id,
@@ -2733,14 +2752,12 @@ def handle_crypto_amount(message):
         order_id = db.create_order(user_id, "crypto", amount, gmp, invoice_id)
         text = (
             f"💲 <b>{amount:.2f} USD → {gmp:.0f} GMP</b>\n\n"
-            "💰 <b>Оплатите по ссылке:</b>\n"
+            f"💰 Оплата в <b>{asset}</b> по ссылке:\n"
             f"🔗 <a href='{pay_url}'>Перейти к оплате</a>\n\n"
             "⏳ После оплаты нажмите кнопку проверки\n"
             "✅ Платёж будет зачислен автоматически\n\n"
-            "📌 Сумма к оплате: <b>{amount:.2f} USD</b>"
+            f"📌 Сумма к оплате: <b>{amount:.2f} USD</b>"
         )
-        keyboard = crypto_wait_keyboard(order_id)
-        # Добавляем кнопку с ссылкой
         keyboard_inline = types.InlineKeyboardMarkup(row_width=1)
         btn_pay = types.InlineKeyboardButton("💳 Оплатить", url=pay_url)
         btn_check = types.InlineKeyboardButton("🔄 Проверить оплату", callback_data=f"check_crypto_{order_id}")
@@ -2888,6 +2905,7 @@ if __name__ == "__main__":
     print(f"👨‍💻 Админ ID: {Config.ADMIN_ID}")
     print(f"💰 Цена 1 GMP: {Config.PRICE_PER_GMP_RUB:.2f} ₽")
     print(f"💲 Курс крипты: 1 USD = {Config.CRYPTO_RATE:.2f} GMP")
+    print(f"💳 Криптовалюта: {Config.CRYPTO_ASSET}")
     print(f"🎁 Кейс каждые: {Config.CASE_COOLDOWN_MINUTES} мин")
     print(f"🎯 Кейс: {Config.MIN_CASE_REWARD}-{Config.MAX_CASE_REWARD} GMP")
     print(f"👥 Рефералов для вывода: {Config.MIN_REFERRALS_FOR_WITHDRAW}")
