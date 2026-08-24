@@ -39,7 +39,7 @@ class Config:
     BOT_USERNAME = "@Sale_gmpbot"
 
     # Crypto Pay API
-    CRYPTO_PAY_TOKEN = "521377:AAx2ftqZQuV65i7lPPaJHbSlYe8zN8p4LGT"
+    CRYPTO_PAY_TOKEN = "625986:AABMjC0XHKb1loGbsSz62MxG4sJ2bovBXBV"
     CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 
     # Начальные значения (будут перезаписаны из БД при запуске)
