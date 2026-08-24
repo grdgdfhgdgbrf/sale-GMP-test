@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
 class Config:
-    BOT_TOKEN = "8553271912:AAEKVRL2bwjY3RO4X9cS7ITeDQ_PfBLfpKc"
+    BOT_TOKEN = "8918094777:AAH6bDZoH8PcSnuj0STi8ycKu7zk8HSHFz8"
     ADMIN_ID = 5356400377
 
     CHANNEL_LINK = "https://t.me/gmp_owner"
@@ -664,8 +664,8 @@ class CryptoPay:
             'Content-Type': 'application/json'
         }
 
-    def create_invoice(self, amount, currency_code='USD', asset='USDT', description=None, paid_btn_name='openWallet'):
-        """Создает инвойс для оплаты"""
+    def create_invoice(self, amount, currency_code='USD', asset='USDT', description=None):
+        """Создает инвойс для оплаты (без указания paid_btn_name)"""
         try:
             data = {
                 'amount': amount,
@@ -674,8 +674,7 @@ class CryptoPay:
             }
             if description:
                 data['description'] = description
-            if paid_btn_name:
-                data['paid_btn_name'] = paid_btn_name
+            # Не передаём paid_btn_name, чтобы избежать ошибки PAID_BTN_NAME_INVALID
 
             response = requests.post(
                 f'{self.api_url}/createInvoice',
@@ -2735,7 +2734,7 @@ def handle_crypto_amount(message):
             )
             bot.register_next_step_handler(message, handle_crypto_amount)
             return
-        # Создаём инвойс в Crypto Pay с указанием asset
+        # Создаём инвойс в Crypto Pay (без параметра paid_btn_name)
         asset = Config.CRYPTO_ASSET
         invoice = crypto_pay.create_invoice(amount, 'USD', asset, f"Покупка GMP для пользователя {user_id}")
         if not invoice:
