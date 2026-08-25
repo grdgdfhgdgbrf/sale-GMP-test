@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
 class Config:
-    # НОВЫЙ ТОКЕН БОТА
     BOT_TOKEN = "8553271912:AAEKVRL2bwjY3RO4X9cS7ITeDQ_PfBLfpKc"
     ADMIN_ID = 5356400377  # замените на свой
 
@@ -39,7 +38,6 @@ class Config:
     SUPPORT_LINK = "@hjklgf1"
     BOT_USERNAME = "@Sale_gmpbot"
 
-    # Crypto Pay API (токен оставляем старый, он рабочий)
     CRYPTO_PAY_TOKEN = "521377:AAx2ftqZQuV65i7lPPaJHbSlYe8zN8p4LGT"
     CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 
@@ -49,13 +47,11 @@ class Config:
     MAX_RUB_AMOUNT = 50000
     TOTAL_GMP_AVAILABLE = 1000
 
-    # Курс криптовалют
-    CRYPTO_RATE = 1.5          # GMP за 1 USD (для обычной крипты)
-    CRYPTO_ASSET = "USDT"      # основная криптовалюта для оплаты GMP
-    GRAM_RATE = 0.4            # сколько GMP за 1 GRAM (TON) – можно использовать для оплаты GMP
-    GRAM_ASSET = "TON"         # актив для грам
+    CRYPTO_RATE = 1.5
+    CRYPTO_ASSET = "USDT"
+    GRAM_RATE = 0.4
+    GRAM_ASSET = "TON"
 
-    # Реквизиты карты
     CARD_NUMBER = "0"
     PHONE_NUMBER = "+7 920 008 91 84"
     BANK_NAME = "озон банк"
@@ -69,11 +65,10 @@ class Config:
     MIN_CASE_REWARD = 1
     MAX_CASE_REWARD = 2
 
-    # Настройки платного кейса (будут храниться в БД)
+    # Настройки платного кейса
     PAID_CASE_PRICE_RUB = 50
     PAID_CASE_PRICE_USD = 0.625
     PAID_CASE_PRICE_TON = 0.4
-    # Награды и вероятности (в процентах, сумма = 100)
     PAID_CASE_REWARDS = [
         {"gmp": 50, "chance": 10},
         {"gmp": 100, "chance": 27},
@@ -85,6 +80,18 @@ class Config:
     MIN_WITHDRAW_GMP = 20
     MIN_REFERRALS_FOR_WITHDRAW = 1
     REFERRAL_PERCENT = 10
+
+    # Настройки ивента (будут в БД)
+    EVENT_ACTIVE = False
+    EVENT_START = None
+    EVENT_END = None
+    EVENT_BONUS_PERCENT = 7
+    EVENT_TASKS = [
+        {"threshold": 1000, "bonus": 77},
+        {"threshold": 2000, "bonus": 170},
+        {"threshold": 6000, "bonus": 500},
+        {"threshold": 10000, "bonus": 999}
+    ]
 
 
 class Database:
@@ -194,6 +201,22 @@ class Database:
             )
         ''')
 
+        # Таблицы для ивента
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS event_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS event_progress (
+                user_id INTEGER PRIMARY KEY,
+                total_purchased REAL DEFAULT 0,
+                claimed_bonuses TEXT DEFAULT '[]'
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info("База данных инициализирована")
@@ -202,9 +225,9 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
+        # Проверяем существующие таблицы и колонки (как раньше)
         cur.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in cur.fetchall()]
-
         if 'total_withdrawn' not in columns:
             cur.execute("ALTER TABLE users ADD COLUMN total_withdrawn REAL DEFAULT 0")
         if 'referral_earnings' not in columns:
@@ -222,6 +245,7 @@ class Database:
         if 'banned_by' not in columns:
             cur.execute("ALTER TABLE banned_users ADD COLUMN banned_by INTEGER DEFAULT NULL")
 
+        # Проверяем наличие настроек в settings
         cur.execute("SELECT key FROM settings")
         existing_keys = [row[0] for row in cur.fetchall()]
 
@@ -254,11 +278,28 @@ class Database:
             if key not in existing_keys:
                 cur.execute('INSERT INTO settings (key, value) VALUES (?, ?)', (key, value))
 
+        # Инициализация настроек ивента
+        cur.execute("SELECT key FROM event_settings")
+        event_keys = [row[0] for row in cur.fetchall()]
+
+        event_defaults = {
+            'event_active': '0',
+            'event_start': '',
+            'event_end': '',
+            'event_bonus_percent': str(Config.EVENT_BONUS_PERCENT),
+            'event_tasks': json.dumps(Config.EVENT_TASKS)
+        }
+
+        for key, value in event_defaults.items():
+            if key not in event_keys:
+                cur.execute('INSERT INTO event_settings (key, value) VALUES (?, ?)', (key, value))
+
         conn.commit()
         conn.close()
         logger.info("Миграция базы данных завершена")
 
     def init_settings(self):
+        # Инициализация основных настроек (как раньше)
         defaults = {
             'PRICE_PER_GMP_RUB': str(Config.PRICE_PER_GMP_RUB),
             'MIN_RUB_AMOUNT': str(Config.MIN_RUB_AMOUNT),
@@ -290,6 +331,7 @@ class Database:
         conn.commit()
         conn.close()
 
+    # ---------- МЕТОДЫ ДЛЯ РАБОТЫ С НАСТРОЙКАМИ ----------
     def get_setting(self, key):
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -320,7 +362,6 @@ class Database:
         conn.close()
 
     def get_paid_case_rewards(self):
-        """Получить настройки платного кейса как список словарей"""
         val = self.get_setting('PAID_CASE_REWARDS')
         if val:
             try:
@@ -332,13 +373,139 @@ class Database:
     def set_paid_case_rewards(self, rewards):
         self.set_setting('PAID_CASE_REWARDS', json.dumps(rewards))
 
-    # ---------- ОСТАЛЬНЫЕ МЕТОДЫ ----------
+    # ---------- МЕТОДЫ ДЛЯ ИВЕНТА ----------
+    def get_event_setting(self, key):
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('SELECT value FROM event_settings WHERE key = ?', (key,))
+        result = cur.fetchone()
+        conn.close()
+        return result[0] if result else None
+
+    def set_event_setting(self, key, value):
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('INSERT OR REPLACE INTO event_settings (key, value) VALUES (?, ?)', (key, str(value)))
+        conn.commit()
+        conn.close()
+
+    def is_event_active(self):
+        active = self.get_event_setting('event_active')
+        if active != '1':
+            return False
+        start_str = self.get_event_setting('event_start')
+        end_str = self.get_event_setting('event_end')
+        if not start_str or not end_str:
+            return False
+        try:
+            start = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
+            end = datetime.strptime(end_str, '%Y-%m-%d %H:%M:%S')
+            now = datetime.now()
+            if now < start or now > end:
+                # Автоматически отключаем, если время истекло
+                self.set_event_setting('event_active', '0')
+                return False
+            return True
+        except:
+            return False
+
+    def start_event(self, days=4):
+        now = datetime.now()
+        end = now + timedelta(days=days)
+        self.set_event_setting('event_active', '1')
+        self.set_event_setting('event_start', now.strftime('%Y-%m-%d %H:%M:%S'))
+        self.set_event_setting('event_end', end.strftime('%Y-%m-%d %H:%M:%S'))
+        logger.info(f"Ивент запущен до {end.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def stop_event(self):
+        self.set_event_setting('event_active', '0')
+        logger.info("Ивент остановлен")
+
+    def get_event_bonus_percent(self):
+        val = self.get_event_setting('event_bonus_percent')
+        try:
+            return float(val)
+        except:
+            return 7.0
+
+    def set_event_bonus_percent(self, percent):
+        self.set_event_setting('event_bonus_percent', str(percent))
+
+    def get_event_tasks(self):
+        val = self.get_event_setting('event_tasks')
+        if val:
+            try:
+                return json.loads(val)
+            except:
+                return Config.EVENT_TASKS
+        return Config.EVENT_TASKS
+
+    def set_event_tasks(self, tasks):
+        self.set_event_setting('event_tasks', json.dumps(tasks))
+
+    def get_event_progress(self, user_id):
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('SELECT total_purchased, claimed_bonuses FROM event_progress WHERE user_id = ?', (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            return row[0], json.loads(row[1])
+        else:
+            return 0, []
+
+    def update_event_progress(self, user_id, amount):
+        # amount – сколько GMP куплено (добавляем к total_purchased)
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('INSERT INTO event_progress (user_id, total_purchased, claimed_bonuses) VALUES (?, ?, ?) '
+                     'ON CONFLICT(user_id) DO UPDATE SET total_purchased = total_purchased + ?',
+                     (user_id, amount, '[]', amount))
+        conn.commit()
+        conn.close()
+        # Теперь получаем обновлённый прогресс и проверяем задания
+        total, claimed = self.get_event_progress(user_id)
+        tasks = self.get_event_tasks()
+        new_bonuses = []
+        for task in tasks:
+            threshold = task['threshold']
+            bonus_gmp = task['bonus']
+            if total >= threshold and threshold not in claimed:
+                # Начисляем бонус
+                self.update_bonus_balance(user_id, bonus_gmp, f"Бонус задания ивента: +{bonus_gmp} GMP (порог {threshold})")
+                claimed.append(threshold)
+                new_bonuses.append(bonus_gmp)
+        # Обновляем claimed_bonuses
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('UPDATE event_progress SET claimed_bonuses = ? WHERE user_id = ?', (json.dumps(claimed), user_id))
+        conn.commit()
+        conn.close()
+        return new_bonuses
+
+    def reset_event_progress(self):
+        # Очистка прогресса при завершении ивента (опционально)
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('DELETE FROM event_progress')
+        conn.commit()
+        conn.close()
+
+    def add_random_bonus(self, user_id, order_amount):
+        # Генерирует случайный бонус до 5% от order_amount и начисляет
+        percent = random.uniform(0, 5)
+        bonus = order_amount * (percent / 100)
+        if bonus > 0:
+            self.update_bonus_balance(user_id, bonus, f"Рандомный бонус ивента: +{bonus:.2f} GMP ({percent:.1f}%)")
+        return bonus, percent
+
+    # ---------- ОСТАЛЬНЫЕ МЕТОДЫ (без изменений) ----------
     def export_all_to_dict(self):
         data = {}
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings']
+        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings', 'event_settings', 'event_progress']
         for table in tables:
             cur.execute(f'SELECT * FROM {table}')
             rows = cur.fetchall()
@@ -350,7 +517,7 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute('PRAGMA foreign_keys = OFF')
-        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings']
+        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings', 'event_settings', 'event_progress']
         for table in tables:
             cur.execute(f'DELETE FROM {table}')
             rows = data.get(table, [])
@@ -365,7 +532,7 @@ class Database:
         conn.commit()
         conn.close()
 
-    # ---------- ОСНОВНЫЕ МЕТОДЫ (users, orders, bonus, etc.) ----------
+    # ---------- МЕТОДЫ ПОЛЬЗОВАТЕЛЕЙ (как раньше) ----------
     def get_user(self, user_id):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -785,6 +952,11 @@ def sync_config_from_db():
         Config.PHONE_NUMBER = db.get_setting('PHONE_NUMBER') or Config.PHONE_NUMBER
         Config.BANK_NAME = db.get_setting('BANK_NAME') or Config.BANK_NAME
         Config.RECIPIENT_NAME = db.get_setting('RECIPIENT_NAME') or Config.RECIPIENT_NAME
+
+        # Загружаем настройки ивента
+        Config.EVENT_ACTIVE = db.is_event_active()
+        # Остальные параметры ивента загружаются при необходимости
+
         return True
     except Exception as e:
         logger.error(f"Ошибка синхронизации: {e}")
@@ -934,51 +1106,102 @@ def check_crypto_payments():
                         user_id = order['user_id']
                         gmp_amount = order['gmp_amount']
 
-                        if Config.TOTAL_GMP_AVAILABLE >= gmp_amount:
-                            db.update_order_status(order_id, 'confirmed')
-                            new_available = Config.TOTAL_GMP_AVAILABLE - gmp_amount
-                            db.set_setting('TOTAL_GMP_AVAILABLE', new_available)
-                            sync_config_from_db()
-
-                            conn = sqlite3.connect(Config.DB_PATH)
-                            cur = conn.cursor()
-                            cur.execute('UPDATE users SET orders_count = orders_count + 1 WHERE user_id = ?', (user_id,))
-                            conn.commit()
-                            conn.close()
-
-                            # Реферальный бонус
-                            user = db.get_user(user_id)
-                            if user and user['referrer_id']:
-                                referrer_id = user['referrer_id']
-                                referral_percent = Config.REFERRAL_PERCENT
-                                bonus = gmp_amount * (referral_percent / 100)
-                                if bonus > 0:
-                                    db.update_bonus_balance(referrer_id, bonus, f"Реферал: +{bonus:.2f} GMP за покупку реферала")
-                                    db.add_referral_earnings(referrer_id, bonus)
-                                    try:
-                                        bot.send_message(
-                                            referrer_id,
-                                            f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP (криптовалюта)!\n"
-                                            f"💰 Вы получили {bonus:.2f} GMP ({referral_percent}%)",
-                                            parse_mode="HTML"
-                                        )
-                                    except:
-                                        pass
-
-                            try:
-                                bot.send_message(
-                                    user_id,
-                                    f"✅ <b>Оплата подтверждена!</b>\n\n"
-                                    f"💎 Куплено: <b>{gmp_amount:.0f} GMP</b>\n"
-                                    "❤️ Спасибо за покупку!\n"
-                                    "Средства зачислены на бонусный баланс.",
-                                    parse_mode="HTML"
-                                )
-                            except:
-                                pass
-                            logger.info(f"Крипто-платёж подтверждён: заказ #{order_id}, {gmp_amount} GMP")
+                        if order['type'] == 'paid_case':
+                            rewards = db.get_paid_case_rewards()
+                            if rewards:
+                                rand_val = random.random() * 100
+                                cumulative = 0
+                                selected = None
+                                for r in rewards:
+                                    cumulative += r['chance']
+                                    if rand_val <= cumulative:
+                                        selected = r
+                                        break
+                                if not selected:
+                                    selected = rewards[-1]
+                                win_gmp = selected['gmp']
+                                db.update_bonus_balance(user_id, win_gmp, f"Платный кейс: +{win_gmp} GMP")
+                                db.update_order_status(order_id, 'confirmed')
+                                try:
+                                    bot.send_message(
+                                        user_id,
+                                        f"🎉 <b>Поздравляем!</b>\n\n"
+                                        f"Вы открыли платный кейс и выиграли <b>{win_gmp} GMP</b>!\n"
+                                        "Средства зачислены на ваш бонусный баланс.",
+                                        parse_mode="HTML"
+                                    )
+                                except:
+                                    pass
+                                logger.info(f"Платный кейс #{order_id} выполнен, выигрыш {win_gmp} GMP")
+                            else:
+                                logger.error(f"Ошибка: нет настроек для платного кейса #{order_id}")
                         else:
-                            logger.warning(f"Недостаточно GMP для заказа #{order_id}")
+                            # Обычная покупка GMP
+                            if Config.TOTAL_GMP_AVAILABLE >= gmp_amount:
+                                db.update_order_status(order_id, 'confirmed')
+                                new_available = Config.TOTAL_GMP_AVAILABLE - gmp_amount
+                                db.set_setting('TOTAL_GMP_AVAILABLE', new_available)
+                                sync_config_from_db()
+
+                                conn = sqlite3.connect(Config.DB_PATH)
+                                cur = conn.cursor()
+                                cur.execute('UPDATE users SET orders_count = orders_count + 1 WHERE user_id = ?', (user_id,))
+                                conn.commit()
+                                conn.close()
+
+                                user = db.get_user(user_id)
+                                if user and user['referrer_id']:
+                                    referrer_id = user['referrer_id']
+                                    referral_percent = Config.REFERRAL_PERCENT
+                                    bonus = gmp_amount * (referral_percent / 100)
+                                    if bonus > 0:
+                                        db.update_bonus_balance(referrer_id, bonus, f"Реферал: +{bonus:.2f} GMP за покупку реферала")
+                                        db.add_referral_earnings(referrer_id, bonus)
+                                        try:
+                                            bot.send_message(
+                                                referrer_id,
+                                                f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP (криптовалюта)!\n"
+                                                f"💰 Вы получили {bonus:.2f} GMP ({referral_percent}%)",
+                                                parse_mode="HTML"
+                                            )
+                                        except:
+                                            pass
+
+                                # ---- ИВЕНТ: бонус 7% и задания ----
+                                if db.is_event_active():
+                                    # 1. Бонус 7%
+                                    event_bonus_percent = db.get_event_bonus_percent()
+                                    extra_bonus = gmp_amount * (event_bonus_percent / 100)
+                                    if extra_bonus > 0:
+                                        db.update_bonus_balance(user_id, extra_bonus, f"Бонус ивента 7%: +{extra_bonus:.2f} GMP")
+                                    # 2. Задания
+                                    task_bonuses = db.update_event_progress(user_id, gmp_amount)
+                                    if task_bonuses:
+                                        task_text = ", ".join([f"+{b} GMP" for b in task_bonuses])
+                                        try:
+                                            bot.send_message(
+                                                user_id,
+                                                f"🎉 <b>Вы выполнили задание ивента!</b>\n"
+                                                f"Получено: {task_text}",
+                                                parse_mode="HTML"
+                                            )
+                                        except:
+                                            pass
+
+                                try:
+                                    bot.send_message(
+                                        user_id,
+                                        f"✅ <b>Оплата подтверждена!</b>\n\n"
+                                        f"💎 Куплено: <b>{gmp_amount:.0f} GMP</b>\n"
+                                        "❤️ Спасибо за покупку!\n"
+                                        "Средства зачислены на бонусный баланс.",
+                                        parse_mode="HTML"
+                                    )
+                                except:
+                                    pass
+                                logger.info(f"Крипто-платёж подтверждён: заказ #{order_id}, {gmp_amount} GMP")
+                            else:
+                                logger.warning(f"Недостаточно GMP для заказа #{order_id}")
                     elif invoice and invoice.get('status') == 'expired':
                         db.update_order_status(order['id'], 'cancelled')
                         logger.info(f"Крипто-инвойс #{order['crypto_invoice_id']} истёк")
@@ -1031,13 +1254,14 @@ def admin_panel_keyboard():
     btn8 = types.InlineKeyboardButton("💳 Реквизиты карты", callback_data="admin_card_details")
     btn9 = types.InlineKeyboardButton("💾 Сохранение", callback_data="admin_backup")
     btn10 = types.InlineKeyboardButton("🎰 Настройка платного кейса", callback_data="admin_paid_case_settings")
-    btn11 = types.InlineKeyboardButton("↩️ Назад", callback_data="back_to_main")
+    btn11 = types.InlineKeyboardButton("🎉 Управление ивентом", callback_data="admin_event_management")
+    btn12 = types.InlineKeyboardButton("↩️ Назад", callback_data="back_to_main")
     keyboard.add(btn1, btn2)
     keyboard.add(btn3, btn4)
     keyboard.add(btn5, btn6)
     keyboard.add(btn7, btn8)
     keyboard.add(btn9, btn10)
-    keyboard.add(btn11)
+    keyboard.add(btn11, btn12)
     return keyboard
 
 def payment_methods_keyboard():
@@ -1183,6 +1407,18 @@ def backup_keyboard():
     keyboard.add(btn1, btn2, btn3)
     return keyboard
 
+# Дополнительная клавиатура для управления ивентом
+def event_management_keyboard():
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("▶️ Запустить ивент (на 4 дня)", callback_data="admin_event_start")
+    btn2 = types.InlineKeyboardButton("⏹ Остановить ивент", callback_data="admin_event_stop")
+    btn3 = types.InlineKeyboardButton("📊 Статус ивента", callback_data="admin_event_status")
+    btn4 = types.InlineKeyboardButton("⚙️ Настройки ивента", callback_data="admin_event_settings")
+    btn5 = types.InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")
+    keyboard.add(btn1, btn2)
+    keyboard.add(btn3, btn4)
+    keyboard.add(btn5)
+    return keyboard
 
 # ========== ФУНКЦИЯ ПОКАЗА ГЛАВНОГО МЕНЮ ==========
 def show_main_menu(chat_id, message_id=None):
@@ -1313,7 +1549,7 @@ def handle_import_doc(message):
         downloaded_file = bot.download_file(file_info.file_path)
         json_str = downloaded_file.decode('utf-8')
         data = json.loads(json_str)
-        required = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings']
+        required = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings', 'event_settings', 'event_progress']
         if not all(table in data for table in required):
             bot.reply_to(message, "❌ Неверный формат файла!")
             return
@@ -1491,7 +1727,7 @@ def callback_handler(call):
         text = (
             "🫪 <b>Бесплатный кейс</b>\n\n"
             "Это бесплатный кейс, где можешь на халяву получить GMP!\n\n"
-            f"⏰ Кейс доступен каждые <b>24 часа</b>\n"
+            f"⏰ Кейс доступен каждые <b>{Config.CASE_COOLDOWN_MINUTES} минут</b>\n"
             "⬇️ Нажми кнопку и попробуй удачу!"
         )
         try:
@@ -1515,14 +1751,13 @@ def callback_handler(call):
                     time_str = format_time_remaining(remaining_seconds)
                     bot.answer_callback_query(call.id, f"⏳ Кейс будет доступен через: {time_str}", show_alert=True)
                     return
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка обработки last_case_open: {e}")
         min_reward = Config.MIN_CASE_REWARD
         max_reward = Config.MAX_CASE_REWARD
         reward = random.randint(min_reward, max_reward)
         db.update_bonus_balance(user_id, reward, f"Бесплатный кейс: +{reward} GMP")
         db.update_last_case_open(user_id)
-        # реферальный бонус (как было)
         user = db.get_user(user_id)
         if user and user['referrer_id']:
             referrer_id = user['referrer_id']
@@ -1553,7 +1788,7 @@ def callback_handler(call):
             "🫪 <b>Что это такое?</b>\n\n"
             "Это бесплатный кейс, где можешь на халяву получить GMP.\n"
             "GMP — это игровая валюта.\n\n"
-            f"⏰ Кейс доступен каждые <b>24 часа</b>\n"
+            f"⏰ Кейс доступен каждые <b>{Config.CASE_COOLDOWN_MINUTES} минут</b>\n"
             "⬇️ Нажми кнопку, чтобы открыть!"
         )
         try:
@@ -1570,11 +1805,9 @@ def callback_handler(call):
         if not rewards:
             bot.answer_callback_query(call.id, "❌ Настройки платного кейса отсутствуют!", show_alert=True)
             return
-        # Показать информацию о кейсе и цену
         price_rub = Config.PAID_CASE_PRICE_RUB
         price_usd = Config.PAID_CASE_PRICE_USD
         price_ton = Config.PAID_CASE_PRICE_TON
-        # Сформируем список наград с шансами
         rewards_text = "\n".join([f"   {r['gmp']} GMP – {r['chance']}%" for r in rewards])
         text = (
             f"💎 <b>Платный кейс</b>\n\n"
@@ -1601,11 +1834,8 @@ def callback_handler(call):
             bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
         return
 
-    # Обработка оплаты платного кейса
     if call.data == "paid_case_rub":
-        # Оплата картой – создаём заказ с типом paid_case и ждём скриншот
         price_rub = Config.PAID_CASE_PRICE_RUB
-        # Создаём заказ с gmp_amount = 0 (будет начислено после подтверждения)
         order_id = db.create_order(user_id, "paid_case", price_rub, 0)
         text = (
             f"💎 <b>Платный кейс</b>\n\n"
@@ -1628,7 +1858,6 @@ def callback_handler(call):
         return
 
     if call.data == "paid_case_usdt":
-        # Оплата USDT через Crypto Pay
         price_usd = Config.PAID_CASE_PRICE_USD
         asset = Config.CRYPTO_ASSET
         invoice = crypto_pay.create_invoice(price_usd, 'USD', asset, f"Платный кейс для {user_id}")
@@ -1637,7 +1866,6 @@ def callback_handler(call):
             return
         invoice_id = invoice.get('invoice_id')
         pay_url = invoice.get('pay_url')
-        # Создаём заказ
         order_id = db.create_order(user_id, "paid_case", price_usd, 0, invoice_id)
         text = (
             f"💎 <b>Платный кейс</b>\n\n"
@@ -1660,9 +1888,8 @@ def callback_handler(call):
         return
 
     if call.data == "paid_case_ton":
-        # Оплата TON через Crypto Pay
         price_ton = Config.PAID_CASE_PRICE_TON
-        asset = Config.GRAM_ASSET  # 'TON'
+        asset = Config.GRAM_ASSET
         invoice = crypto_pay.create_invoice(price_ton, 'USD', asset, f"Платный кейс (TON) для {user_id}")
         if not invoice:
             bot.answer_callback_query(call.id, "❌ Ошибка создания счёта!", show_alert=True)
@@ -1837,7 +2064,7 @@ def callback_handler(call):
         bot.register_next_step_handler(call.message, handle_gram_amount)
         return
 
-    # ====== ПРОВЕРКА КРИПТО-ОПЛАТЫ (общая для всех крипто-заказов) ======
+    # ====== ПРОВЕРКА КРИПТО-ОПЛАТЫ ======
     if call.data.startswith("check_crypto_"):
         order_id = int(call.data.split("_")[2])
         order = db.get_order(order_id)
@@ -1856,89 +2083,104 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "❌ Не удалось проверить оплату. Попробуйте позже.", show_alert=True)
             return
         if invoice.get('status') == 'paid':
-            # Для платного кейса – обрабатываем отдельно
-            if order['type'] == 'paid_case':
-                # Проводим лотерею и начисляем GMP
-                rewards = db.get_paid_case_rewards()
-                if not rewards:
-                    bot.answer_callback_query(call.id, "❌ Ошибка конфигурации кейса", show_alert=True)
-                    return
-                # Лотерея
-                rand_val = random.random() * 100
-                cumulative = 0
-                selected = None
-                for r in rewards:
-                    cumulative += r['chance']
-                    if rand_val <= cumulative:
-                        selected = r
-                        break
-                if not selected:
-                    selected = rewards[-1]  # fallback
-                win_gmp = selected['gmp']
-                # Начисляем на бонусный баланс
-                db.update_bonus_balance(user_id, win_gmp, f"Платный кейс: +{win_gmp} GMP")
-                # Обновляем статус заказа
-                db.update_order_status(order_id, 'confirmed')
-                # Уведомляем пользователя
-                try:
-                    bot.send_message(
-                        user_id,
-                        f"🎉 <b>Поздравляем!</b>\n\n"
-                        f"Вы открыли платный кейс и выиграли <b>{win_gmp} GMP</b>!\n"
-                        "Средства зачислены на ваш бонусный баланс.",
-                        parse_mode="HTML"
-                    )
-                except:
-                    pass
-                bot.answer_callback_query(call.id, f"✅ Оплата подтверждена! Вы выиграли {win_gmp} GMP!", show_alert=True)
-                show_main_menu(chat_id)
-                return
-            else:
-                # Обычная покупка GMP
-                gmp_amount = order['gmp_amount']
-                if Config.TOTAL_GMP_AVAILABLE >= gmp_amount:
-                    db.update_order_status(order_id, 'confirmed')
-                    new_available = Config.TOTAL_GMP_AVAILABLE - gmp_amount
-                    db.set_setting('TOTAL_GMP_AVAILABLE', new_available)
-                    sync_config_from_db()
-                    conn = sqlite3.connect(Config.DB_PATH)
-                    cur = conn.cursor()
-                    cur.execute('UPDATE users SET orders_count = orders_count + 1 WHERE user_id = ?', (user_id,))
-                    conn.commit()
-                    conn.close()
-                    # реферальный бонус
-                    user = db.get_user(user_id)
-                    if user and user['referrer_id']:
-                        referrer_id = user['referrer_id']
-                        referral_percent = Config.REFERRAL_PERCENT
-                        bonus = gmp_amount * (referral_percent / 100)
-                        if bonus > 0:
-                            db.update_bonus_balance(referrer_id, bonus, f"Реферал: +{bonus:.2f} GMP за покупку реферала")
-                            db.add_referral_earnings(referrer_id, bonus)
-                            try:
-                                bot.send_message(
-                                    referrer_id,
-                                    f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP (криптовалюта)!\n"
-                                    f"💰 Вы получили {bonus:.2f} GMP ({referral_percent}%)",
-                                    parse_mode="HTML"
-                                )
-                            except:
-                                pass
-                    try:
-                        bot.send_message(
-                            user_id,
-                            f"✅ <b>Оплата подтверждена!</b>\n\n"
-                            f"💎 Куплено: <b>{gmp_amount:.0f} GMP</b>\n"
-                            "❤️ Спасибо за покупку!\n"
-                            "Средства зачислены на бонусный баланс.",
-                            parse_mode="HTML"
-                        )
-                    except:
-                        pass
-                    bot.answer_callback_query(call.id, "✅ Оплата подтверждена!", show_alert=True)
-                    show_main_menu(chat_id)
+            # Если заказ ещё не обработан, запускаем ручную обработку
+            if order['status'] == 'pending':
+                if order['type'] == 'paid_case':
+                    rewards = db.get_paid_case_rewards()
+                    if rewards:
+                        rand_val = random.random() * 100
+                        cumulative = 0
+                        selected = None
+                        for r in rewards:
+                            cumulative += r['chance']
+                            if rand_val <= cumulative:
+                                selected = r
+                                break
+                        if not selected:
+                            selected = rewards[-1]
+                        win_gmp = selected['gmp']
+                        db.update_bonus_balance(user_id, win_gmp, f"Платный кейс: +{win_gmp} GMP")
+                        db.update_order_status(order_id, 'confirmed')
+                        try:
+                            bot.send_message(
+                                user_id,
+                                f"🎉 <b>Поздравляем!</b>\n\n"
+                                f"Вы открыли платный кейс и выиграли <b>{win_gmp} GMP</b>!\n"
+                                "Средства зачислены на ваш бонусный баланс.",
+                                parse_mode="HTML"
+                            )
+                        except:
+                            pass
+                        bot.answer_callback_query(call.id, f"✅ Оплата подтверждена! Вы выиграли {win_gmp} GMP!", show_alert=True)
+                        show_main_menu(chat_id)
+                    else:
+                        bot.answer_callback_query(call.id, "❌ Ошибка конфигурации кейса", show_alert=True)
                 else:
-                    bot.answer_callback_query(call.id, "❌ Недостаточно GMP на складе!", show_alert=True)
+                    gmp_amount = order['gmp_amount']
+                    if Config.TOTAL_GMP_AVAILABLE >= gmp_amount:
+                        db.update_order_status(order_id, 'confirmed')
+                        new_available = Config.TOTAL_GMP_AVAILABLE - gmp_amount
+                        db.set_setting('TOTAL_GMP_AVAILABLE', new_available)
+                        sync_config_from_db()
+                        conn = sqlite3.connect(Config.DB_PATH)
+                        cur = conn.cursor()
+                        cur.execute('UPDATE users SET orders_count = orders_count + 1 WHERE user_id = ?', (user_id,))
+                        conn.commit()
+                        conn.close()
+                        user = db.get_user(user_id)
+                        if user and user['referrer_id']:
+                            referrer_id = user['referrer_id']
+                            referral_percent = Config.REFERRAL_PERCENT
+                            bonus = gmp_amount * (referral_percent / 100)
+                            if bonus > 0:
+                                db.update_bonus_balance(referrer_id, bonus, f"Реферал: +{bonus:.2f} GMP за покупку реферала")
+                                db.add_referral_earnings(referrer_id, bonus)
+                                try:
+                                    bot.send_message(
+                                        referrer_id,
+                                        f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP!\n"
+                                        f"💰 Вы получили {bonus:.2f} GMP ({referral_percent}%)",
+                                        parse_mode="HTML"
+                                    )
+                                except:
+                                    pass
+                        # ---- ИВЕНТ ----
+                        if db.is_event_active():
+                            # 7% бонус
+                            event_bonus_percent = db.get_event_bonus_percent()
+                            extra_bonus = gmp_amount * (event_bonus_percent / 100)
+                            if extra_bonus > 0:
+                                db.update_bonus_balance(user_id, extra_bonus, f"Бонус ивента 7%: +{extra_bonus:.2f} GMP")
+                            # Задания
+                            task_bonuses = db.update_event_progress(user_id, gmp_amount)
+                            if task_bonuses:
+                                task_text = ", ".join([f"+{b} GMP" for b in task_bonuses])
+                                try:
+                                    bot.send_message(
+                                        user_id,
+                                        f"🎉 <b>Вы выполнили задание ивента!</b>\n"
+                                        f"Получено: {task_text}",
+                                        parse_mode="HTML"
+                                    )
+                                except:
+                                    pass
+                        try:
+                            bot.send_message(
+                                user_id,
+                                f"✅ <b>Оплата подтверждена!</b>\n\n"
+                                f"💎 Куплено: <b>{gmp_amount:.0f} GMP</b>\n"
+                                "❤️ Спасибо за покупку!\n"
+                                "Средства зачислены на бонусный баланс.",
+                                parse_mode="HTML"
+                            )
+                        except:
+                            pass
+                        bot.answer_callback_query(call.id, "✅ Оплата подтверждена!", show_alert=True)
+                        show_main_menu(chat_id)
+                    else:
+                        bot.answer_callback_query(call.id, "❌ Недостаточно GMP на складе!", show_alert=True)
+            else:
+                bot.answer_callback_query(call.id, "✅ Заказ уже обработан!", show_alert=True)
         elif invoice.get('status') == 'expired':
             db.update_order_status(order_id, 'cancelled')
             bot.answer_callback_query(call.id, "❌ Время оплаты истекло!", show_alert=True)
@@ -1959,6 +2201,130 @@ def callback_handler(call):
             if "message is not modified" not in str(e):
                 logger.error(f"Ошибка admin_panel: {e}")
             bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=admin_panel_keyboard())
+        return
+
+    # ====== АДМИН: УПРАВЛЕНИЕ ИВЕНТОМ ======
+    if call.data == "admin_event_management":
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
+            return
+        text = "🎉 <b>Управление ивентом к 1 сентября</b>"
+        try:
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=event_management_keyboard())
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                logger.error(f"Ошибка admin_event_management: {e}")
+            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=event_management_keyboard())
+        return
+
+    if call.data == "admin_event_start":
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
+            return
+        if db.is_event_active():
+            bot.answer_callback_query(call.id, "❌ Ивент уже активен!", show_alert=True)
+            return
+        db.start_event(4)  # на 4 дня
+        sync_config_from_db()
+        bot.answer_callback_query(call.id, "✅ Ивент запущен на 4 дня!", show_alert=True)
+        # Уведомление всем пользователям
+        conn = sqlite3.connect(Config.DB_PATH)
+        cur = conn.cursor()
+        cur.execute('SELECT user_id FROM users')
+        users = cur.fetchall()
+        conn.close()
+        for user in users:
+            try:
+                bot.send_message(
+                    user[0],
+                    "🎉 <b>Ивент к 1 сентября запущен!</b>\n\n"
+                    "🔥 <b>Бонус 7%</b> на все покупки GMP!\n"
+                    "📊 <b>Задания:</b>\n"
+                    "   • 1000 GMP → +77 GMP\n"
+                    "   • 2000 GMP → +170 GMP\n"
+                    "   • 6000 GMP → +500 GMP\n"
+                    "   • 10000 GMP → +999 GMP\n\n"
+                    "⏰ Ивент действует 4 дня!\n"
+                    "💪 Успейте заработать больше!",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+        # Обновить сообщение в админ-панели
+        safe_edit_or_send(chat_id, message_id, "🎉 Ивент запущен!", parse_mode="HTML", reply_markup=event_management_keyboard())
+        return
+
+    if call.data == "admin_event_stop":
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
+            return
+        db.stop_event()
+        sync_config_from_db()
+        bot.answer_callback_query(call.id, "⏹ Ивент остановлен!", show_alert=True)
+        safe_edit_or_send(chat_id, message_id, "⏹ Ивент остановлен.", parse_mode="HTML", reply_markup=event_management_keyboard())
+        return
+
+    if call.data == "admin_event_status":
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
+            return
+        active = db.is_event_active()
+        start_str = db.get_event_setting('event_start')
+        end_str = db.get_event_setting('event_end')
+        bonus = db.get_event_bonus_percent()
+        tasks = db.get_event_tasks()
+        tasks_text = "\n".join([f"   {t['threshold']} GMP → +{t['bonus']} GMP" for t in tasks])
+        if active:
+            status = "✅ Активен"
+            remaining = ""
+            if end_str:
+                try:
+                    end_dt = datetime.strptime(end_str, '%Y-%m-%d %H:%M:%S')
+                    now = datetime.now()
+                    delta = end_dt - now
+                    if delta.total_seconds() > 0:
+                        remaining = f"\n⏳ Осталось: {format_time_remaining(delta.total_seconds())}"
+                except:
+                    pass
+        else:
+            status = "❌ Неактивен"
+            remaining = ""
+        text = (
+            f"📊 <b>Статус ивента</b>\n"
+            f"Состояние: {status}{remaining}\n\n"
+            f"🎁 Бонус: {bonus}%\n"
+            f"📋 Задания:\n{tasks_text}\n\n"
+            f"📅 Старт: {format_date(start_str)}\n"
+            f"📅 Финиш: {format_date(end_str)}"
+        )
+        try:
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=event_management_keyboard())
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                logger.error(f"Ошибка admin_event_status: {e}")
+            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=event_management_keyboard())
+        return
+
+    if call.data == "admin_event_settings":
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
+            return
+        text = (
+            "⚙️ <b>Настройки ивента</b>\n\n"
+            "Введите номер параметра для изменения:\n"
+            "1 - Бонусный процент (сейчас {})\n"
+            "2 - Задания (формат: порог:бонус, порог:бонус, ...)\n"
+            "   Пример: 1000:77, 2000:170, 6000:500, 10000:999\n\n"
+            "Текущие задания:\n{}"
+        ).format(db.get_event_bonus_percent(),
+                 "\n".join([f"   {t['threshold']} → +{t['bonus']}" for t in db.get_event_tasks()]))
+        try:
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_to_main_keyboard())
+        except Exception as e:
+            if "message is not modified" not in str(e):
+                logger.error(f"Ошибка admin_event_settings: {e}")
+            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=back_to_main_keyboard())
+        bot.register_next_step_handler(call.message, handle_admin_event_settings)
         return
 
     # ====== АДМИН: НАСТРОЙКА ПЛАТНОГО КЕЙСА ======
@@ -2211,7 +2577,7 @@ def callback_handler(call):
         show_main_menu(chat_id)
         return
 
-    # ====== ПОДТВЕРЖДЕНИЕ РУБЛЕЙ (для покупки GMP и платного кейса) ======
+    # ====== ПОДТВЕРЖДЕНИЕ РУБЛЕЙ ======
     if call.data.startswith("confirm_rubles_"):
         order_id = int(call.data.split("_")[2])
         order = db.get_order(order_id)
@@ -2299,9 +2665,10 @@ def callback_handler(call):
             btn_confirm = types.InlineKeyboardButton("✅ Выполнить", callback_data=f"admin_confirm_{order_id}")
             btn_cancel = types.InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_cancel_{order_id}")
             btn_screenshot = types.InlineKeyboardButton("🖼 Скрин", callback_data=f"admin_order_screenshot_{order_id}")
+            btn_random_bonus = types.InlineKeyboardButton("🎲 Рандомный бонус", callback_data=f"admin_random_bonus_{order_id}")
             btn_back = types.InlineKeyboardButton("↩️ Назад", callback_data="admin_orders")
             keyboard.add(btn_confirm, btn_cancel)
-            keyboard.add(btn_screenshot)
+            keyboard.add(btn_screenshot, btn_random_bonus)
             keyboard.add(btn_back)
             try:
                 bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=keyboard)
@@ -2327,6 +2694,43 @@ def callback_handler(call):
             except Exception as e:
                 logger.error(f"Ошибка отправки скриншота: {e}")
                 bot.answer_callback_query(call.id, "❌ Ошибка при отправке скрина", show_alert=True)
+            return
+
+        # ====== РАНДОМНЫЙ БОНУС ДЛЯ ЗАКАЗА ======
+        if call.data.startswith("admin_random_bonus_"):
+            order_id = int(call.data.split("_")[3])
+            order = db.get_order(order_id)
+            if not order:
+                bot.answer_callback_query(call.id, "❌ Заказ не найден")
+                return
+            if order['status'] != 'pending':
+                bot.answer_callback_query(call.id, "❌ Бонус можно выдать только для ожидающего заказа!", show_alert=True)
+                return
+            # Генерируем бонус до 5% от суммы заказа (amount – в USD или RUB?)
+            # Для рублёвых заказов берём gmp_amount, так как бонус в GMP
+            # Для крипто-заказов тоже gmp_amount
+            gmp_amount = order['gmp_amount']
+            if gmp_amount <= 0:
+                bot.answer_callback_query(call.id, "❌ Некорректная сумма заказа", show_alert=True)
+                return
+            percent = random.uniform(0, 5)
+            bonus = gmp_amount * (percent / 100)
+            if bonus < 0.01:
+                bot.answer_callback_query(call.id, f"🎲 Бонус составил {percent:.1f}%, но это меньше 0.01 GMP, не начислен.", show_alert=True)
+                return
+            db.update_bonus_balance(order['user_id'], bonus, f"Рандомный бонус ивента: +{bonus:.2f} GMP ({percent:.1f}%)")
+            bot.answer_callback_query(call.id, f"✅ Выдан рандомный бонус: {bonus:.2f} GMP ({percent:.1f}%)", show_alert=True)
+            # Уведомляем пользователя
+            try:
+                bot.send_message(
+                    order['user_id'],
+                    f"🎲 <b>Вам выдан рандомный бонус!</b>\n"
+                    f"💰 +{bonus:.2f} GMP ({percent:.1f}% от суммы покупки)\n"
+                    "Бонус зачислен на бонусный баланс.",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
             return
 
     # ========== АДМИН: ЗАЯВКИ НА ВЫВОД ==========
@@ -2427,7 +2831,7 @@ def callback_handler(call):
         bot.register_next_step_handler(call.message, handle_broadcast)
         return
 
-    # ========== АДМИН: ПОДТВЕРЖДЕНИЕ ЗАЯВОК (включая платный кейс) ==========
+    # ========== АДМИН: ПОДТВЕРЖДЕНИЕ ЗАЯВОК ==========
     if call.data.startswith("admin_confirm_"):
         order_id = int(call.data.split("_")[2])
         order = db.get_order(order_id)
@@ -2435,9 +2839,7 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
 
-        # Если это платный кейс – обрабатываем отдельно
         if order['type'] == 'paid_case':
-            # Проводим лотерею
             rewards = db.get_paid_case_rewards()
             if not rewards:
                 bot.answer_callback_query(call.id, "❌ Ошибка конфигурации кейса", show_alert=True)
@@ -2453,10 +2855,8 @@ def callback_handler(call):
             if not selected:
                 selected = rewards[-1]
             win_gmp = selected['gmp']
-            # Начисляем бонус
             db.update_bonus_balance(order['user_id'], win_gmp, f"Платный кейс: +{win_gmp} GMP")
             db.update_order_status(order_id, 'confirmed')
-            # Удаляем админское сообщение
             admin_msg_id = order['admin_message_id'] if order['admin_message_id'] else None
             if admin_msg_id:
                 safe_delete_message(Config.ADMIN_ID, admin_msg_id)
@@ -2500,7 +2900,6 @@ def callback_handler(call):
         new_available = Config.TOTAL_GMP_AVAILABLE - order['gmp_amount']
         db.set_setting('TOTAL_GMP_AVAILABLE', new_available)
         sync_config_from_db()
-        # реферальный бонус
         if user and user['referrer_id']:
             referrer_id = user['referrer_id']
             referral_percent = Config.REFERRAL_PERCENT
@@ -2517,6 +2916,28 @@ def callback_handler(call):
                     )
                 except:
                     pass
+
+        # ---- ИВЕНТ ----
+        if db.is_event_active():
+            # Бонус 7%
+            event_bonus_percent = db.get_event_bonus_percent()
+            extra_bonus = order['gmp_amount'] * (event_bonus_percent / 100)
+            if extra_bonus > 0:
+                db.update_bonus_balance(user_id_order, extra_bonus, f"Бонус ивента 7%: +{extra_bonus:.2f} GMP")
+            # Задания
+            task_bonuses = db.update_event_progress(user_id_order, order['gmp_amount'])
+            if task_bonuses:
+                task_text = ", ".join([f"+{b} GMP" for b in task_bonuses])
+                try:
+                    bot.send_message(
+                        user_id_order,
+                        f"🎉 <b>Вы выполнили задание ивента!</b>\n"
+                        f"Получено: {task_text}",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+
         admin_msg_id = order['admin_message_id'] if order['admin_message_id'] else None
         if admin_msg_id:
             safe_delete_message(Config.ADMIN_ID, admin_msg_id)
@@ -2651,6 +3072,80 @@ def callback_handler(call):
 
 # ========== ОБРАБОТЧИКИ ВВОДА ==========
 
+# ----- АДМИН: НАСТРОЙКА ИВЕНТА -----
+def handle_admin_event_settings(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not is_admin(user_id):
+        return
+    try:
+        choice = int(message.text.strip())
+        if choice not in [1, 2]:
+            raise ValueError
+    except:
+        bot.send_message(chat_id, "❌ Введите 1 или 2.", parse_mode="HTML")
+        return
+    if choice == 1:
+        msg = bot.send_message(
+            chat_id,
+            f"Текущий бонусный процент: {db.get_event_bonus_percent()}%\nВведите новый процент:",
+            parse_mode="HTML",
+            reply_markup=back_to_main_keyboard()
+        )
+        bot.register_next_step_handler(msg, handle_admin_event_bonus_percent)
+    elif choice == 2:
+        msg = bot.send_message(
+            chat_id,
+            "Введите задания в формате: порог:бонус, порог:бонус, ...\n"
+            "Пример: 1000:77, 2000:170, 6000:500, 10000:999\n\n"
+            "Текущие задания:\n" + "\n".join([f"   {t['threshold']} → +{t['bonus']}" for t in db.get_event_tasks()]),
+            parse_mode="HTML",
+            reply_markup=back_to_main_keyboard()
+        )
+        bot.register_next_step_handler(msg, handle_admin_event_tasks)
+    else:
+        bot.send_message(chat_id, "❌ Неверный выбор.", parse_mode="HTML")
+
+def handle_admin_event_bonus_percent(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not is_admin(user_id):
+        return
+    try:
+        percent = float(message.text.strip())
+        if percent < 0:
+            raise ValueError
+        db.set_event_bonus_percent(percent)
+        sync_config_from_db()
+        bot.send_message(chat_id, f"✅ Бонусный процент ивента установлен: {percent}%", parse_mode="HTML")
+        show_main_menu(chat_id)
+    except:
+        bot.send_message(chat_id, "❌ Некорректное значение.", parse_mode="HTML")
+
+def handle_admin_event_tasks(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not is_admin(user_id):
+        return
+    try:
+        parts = [p.strip() for p in message.text.split(',')]
+        tasks = []
+        for part in parts:
+            threshold_str, bonus_str = part.split(':')
+            threshold = float(threshold_str)
+            bonus = float(bonus_str)
+            if threshold <= 0 or bonus <= 0:
+                raise ValueError
+            tasks.append({"threshold": threshold, "bonus": bonus})
+        if not tasks:
+            raise ValueError
+        db.set_event_tasks(tasks)
+        sync_config_from_db()
+        bot.send_message(chat_id, "✅ Задания ивента обновлены!", parse_mode="HTML")
+        show_main_menu(chat_id)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Ошибка формата: {e}\nИспользуйте формат: 1000:77, 2000:170, ...", parse_mode="HTML")
+
 # ----- АДМИН: НАСТРОЙКА ПЛАТНОГО КЕЙСА -----
 def handle_admin_paid_case_settings(message):
     user_id = message.from_user.id
@@ -2665,7 +3160,6 @@ def handle_admin_paid_case_settings(message):
         bot.send_message(chat_id, "❌ Введите число от 1 до 4.", parse_mode="HTML")
         return
     if choice == 1:
-        # Цена в рублях
         msg = bot.send_message(
             chat_id,
             f"Текущая цена в рублях: {Config.PAID_CASE_PRICE_RUB:.2f}\nВведите новую цену:",
@@ -3369,6 +3863,7 @@ if __name__ == "__main__":
     print(f"🎯 Бесплатный кейс: {Config.MIN_CASE_REWARD}-{Config.MAX_CASE_REWARD} GMP")
     print(f"👥 Рефералов для вывода: {Config.MIN_REFERRALS_FOR_WITHDRAW}")
     print(f"📦 Доступно GMP: {Config.TOTAL_GMP_AVAILABLE:.0f}")
+    print(f"🎉 Ивент активен: {'Да' if db.is_event_active() else 'Нет'}")
     print("=" * 60)
     print("🔄 Бот запущен и готов к работе!")
     print("=" * 60)
