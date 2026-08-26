@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ ==========
 class Config:
+    # НОВЫЙ ТОКЕН БОТА
     BOT_TOKEN = "8553271912:AAEKVRL2bwjY3RO4X9cS7ITeDQ_PfBLfpKc"
-    ADMIN_ID = 5356400377
+    ADMIN_ID = 5356400377  # замените на свой
 
     CHANNEL_LINK = "https://t.me/gmp_owner"
     CHANNEL_ID = "@gmp_owner"
@@ -38,19 +39,23 @@ class Config:
     SUPPORT_LINK = "@hjklgf1"
     BOT_USERNAME = "@Sale_gmpbot"
 
+    # Crypto Pay API (токен оставляем старый, он рабочий)
     CRYPTO_PAY_TOKEN = "521377:AAx2ftqZQuV65i7lPPaJHbSlYe8zN8p4LGT"
     CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 
+    # Начальные значения (будут перезаписаны из БД)
     PRICE_PER_GMP_RUB = 0.3
     MIN_RUB_AMOUNT = 1
     MAX_RUB_AMOUNT = 50000
     TOTAL_GMP_AVAILABLE = 1000
 
-    CRYPTO_RATE = 1.5
-    CRYPTO_ASSET = "USDT"
-    GRAM_RATE = 0.4
-    GRAM_ASSET = "TON"
+    # Курс криптовалют
+    CRYPTO_RATE = 1.5          # GMP за 1 USD (для обычной крипты)
+    CRYPTO_ASSET = "USDT"      # основная криптовалюта для оплаты GMP
+    GRAM_RATE = 0.4            # сколько GMP за 1 GRAM (TON) – можно использовать для оплаты GMP
+    GRAM_ASSET = "TON"         # актив для грам
 
+    # Реквизиты карты
     CARD_NUMBER = "0"
     PHONE_NUMBER = "+7 920 008 91 84"
     BANK_NAME = "озон банк"
@@ -59,10 +64,12 @@ class Config:
     DB_PATH = "bot_database.db"
     NAZVANIA = "GMP от owner"
 
+    # Настройки бесплатного кейса
     CASE_COOLDOWN_MINUTES = 1440
     MIN_CASE_REWARD = 1
     MAX_CASE_REWARD = 2
 
+    # Настройки платного кейса
     PAID_CASE_PRICE_RUB = 50
     PAID_CASE_PRICE_USD = 0.625
     PAID_CASE_PRICE_TON = 0.4
@@ -107,7 +114,7 @@ class Database:
                 referral_earnings REAL DEFAULT 0,
                 last_case_open TIMESTAMP DEFAULT NULL,
                 total_withdrawn REAL DEFAULT 0,
-                cashback REAL DEFAULT 0
+                cashback_earned REAL DEFAULT 0   -- НОВОЕ ПОЛЕ: накопленный кешбэк (в GMP)
             )
         ''')
 
@@ -204,9 +211,10 @@ class Database:
             cur.execute("ALTER TABLE users ADD COLUMN referral_earnings REAL DEFAULT 0")
         if 'last_case_open' not in columns:
             cur.execute("ALTER TABLE users ADD COLUMN last_case_open TIMESTAMP DEFAULT NULL")
-        if 'cashback' not in columns:
-            cur.execute("ALTER TABLE users ADD COLUMN cashback REAL DEFAULT 0")
-            logger.info("Добавлена колонка cashback в users")
+        # Добавляем колонку для кешбэка
+        if 'cashback_earned' not in columns:
+            cur.execute("ALTER TABLE users ADD COLUMN cashback_earned REAL DEFAULT 0")
+            logger.info("Добавлена колонка cashback_earned в users")
 
         cur.execute("PRAGMA table_info(orders)")
         columns = [col[1] for col in cur.fetchall()]
@@ -327,22 +335,6 @@ class Database:
     def set_paid_case_rewards(self, rewards):
         self.set_setting('PAID_CASE_REWARDS', json.dumps(rewards))
 
-    # ---------- ДОПОЛНИТЕЛЬНЫЙ МЕТОД ДЛЯ КЕШБЭКА ----------
-    def add_cashback(self, user_id, amount):
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute('UPDATE users SET cashback = cashback + ? WHERE user_id = ?', (amount, user_id))
-        conn.commit()
-        conn.close()
-
-    def get_cashback(self, user_id):
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute('SELECT cashback FROM users WHERE user_id = ?', (user_id,))
-        result = cur.fetchone()
-        conn.close()
-        return result[0] if result else 0
-
     # ---------- ОСТАЛЬНЫЕ МЕТОДЫ ----------
     def export_all_to_dict(self):
         data = {}
@@ -392,8 +384,9 @@ class Database:
         referral_code = f"REF{user_id}{random.randint(1000, 9999)}"
         cur.execute('''
             INSERT OR REPLACE INTO users 
-            (user_id, username, first_name, last_name, registered, last_activity, referrer_id, referral_code)
-            VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?)
+            (user_id, username, first_name, last_name, registered, last_activity, referrer_id, referral_code,
+             cashback_earned)
+            VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?, ?, 0)
         ''', (user_id, username, first_name, last_name, referrer_id, referral_code))
         cur.execute('INSERT OR IGNORE INTO bonus_balance (user_id, balance) VALUES (?, 0)', (user_id,))
         conn.commit()
@@ -706,6 +699,23 @@ class Database:
         conn.close()
         return updated > 0
 
+    # ---------- КЕШБЭК ----------
+    def add_cashback(self, user_id, amount_gmp):
+        """Увеличивает накопленный кешбэк пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET cashback_earned = cashback_earned + ? WHERE user_id = ?', (amount_gmp, user_id))
+        conn.commit()
+        conn.close()
+
+    def get_cashback_earned(self, user_id):
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('SELECT cashback_earned FROM users WHERE user_id = ?', (user_id,))
+        result = cur.fetchone()
+        conn.close()
+        return result[0] if result else 0.0
+
 
 # ========== CRYPTO PAY API ==========
 class CryptoPay:
@@ -766,7 +776,7 @@ class CryptoPay:
             return None
 
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
 db = Database(Config.DB_PATH)
 bot = telebot.TeleBot(Config.BOT_TOKEN)
 crypto_pay = CryptoPay(Config.CRYPTO_PAY_TOKEN)
@@ -782,9 +792,10 @@ def sync_config_from_db():
         Config.MIN_REFERRALS_FOR_WITHDRAW = db.get_setting_int('MIN_REFERRALS_FOR_WITHDRAW')
         Config.REFERRAL_PERCENT = db.get_setting_float('REFERRAL_PERCENT')
         Config.CASE_COOLDOWN_MINUTES = db.get_setting_int('CASE_COOLDOWN_MINUTES')
-        
+
         min_reward = db.get_setting_int('MIN_CASE_REWARD')
         max_reward = db.get_setting_int('MAX_CASE_REWARD')
+
         if min_reward > max_reward:
             db.set_setting('MIN_CASE_REWARD', max_reward)
             db.set_setting('MAX_CASE_REWARD', min_reward)
@@ -888,6 +899,7 @@ def format_time_remaining(seconds):
         parts.append(f"{secs} с.")
     return " ".join(parts) if parts else "0 с."
 
+
 # ========== ФУНКЦИЯ ПОКАЗА БАЛАНСА ==========
 def show_balance(chat_id, message_id=None, user_id=None):
     if user_id is None:
@@ -946,18 +958,6 @@ def start_withdraw_process(chat_id, user_id, message_id=None):
             pass
     bot.register_next_step_handler(msg, handle_withdraw_amount)
 
-# ========== ФУНКЦИЯ ДЛЯ НАЧИСЛЕНИЯ КЕШБЭКА ==========
-def calculate_cashback(amount_rub):
-    """Возвращает процент кешбэка в зависимости от суммы в рублях"""
-    if amount_rub < 100:
-        return 1.0
-    elif amount_rub < 1000:
-        return 2.0
-    elif amount_rub < 10000:
-        return 3.0
-    else:
-        return 4.0
-
 # ========== ПРОВЕРКА КРИПТО-ПЛАТЕЖЕЙ (ФОН) ==========
 def check_crypto_payments():
     while True:
@@ -972,6 +972,7 @@ def check_crypto_payments():
                         gmp_amount = order['gmp_amount']
 
                         if order['type'] == 'paid_case':
+                            # Платный кейс
                             rewards = db.get_paid_case_rewards()
                             if rewards:
                                 rand_val = random.random() * 100
@@ -1001,7 +1002,7 @@ def check_crypto_payments():
                             else:
                                 logger.error(f"Ошибка: нет настроек для платного кейса #{order_id}")
                         else:
-                            # Обычная покупка GMP
+                            # Обычная покупка GMP (крипта)
                             if Config.TOTAL_GMP_AVAILABLE >= gmp_amount:
                                 db.update_order_status(order_id, 'confirmed')
                                 new_available = Config.TOTAL_GMP_AVAILABLE - gmp_amount
@@ -1014,16 +1015,6 @@ def check_crypto_payments():
                                 conn.commit()
                                 conn.close()
 
-                                # Начисляем кешбэк (если сумма покупки в рублях известна)
-                                # Для крипто-покупок сумма в USD, но у нас есть amount (USD). Нужно перевести в рубли?
-                                # В заказе для крипты amount – это сумма в USD. Мы можем использовать amount * курс_USD_to_RUB,
-                                # но у нас нет курса USD/RUB. Поэтому для крипто-покупок кешбэк не начисляем (или начисляем от USD?).
-                                # По условию кешбэк зависит от суммы в рублях, поэтому для крипто-платежей проще не начислять,
-                                # либо пересчитывать по рыночному курсу. Но мы не знаем курс. Пропустим начисление кешбэка для крипты.
-                                # Однако можно использовать приблизительный курс, но лучше добавить настройку курса USD/RUB.
-                                # Для простоты оставим так, как есть. В будущем можно добавить курс.
-
-                                # Реферальный бонус
                                 user = db.get_user(user_id)
                                 if user and user['referrer_id']:
                                     referrer_id = user['referrer_id']
@@ -1297,7 +1288,7 @@ def show_main_menu(chat_id, message_id=None):
         " • Пополнение криптовалютой (USDT, TON)\n"
         " • Вывод бонусного баланса\n"
         " • Бесплатные и платные кейсы\n"
-        " • Кешбэк до 4% за покупки\n\n"
+        " • Кешбэк с каждой покупки!\n\n"
         "✨ <b>Выбери действие ниже:</b>"
     )
     markup = main_menu_keyboard(user_id)
@@ -1486,7 +1477,7 @@ def callback_handler(call):
         referral_earnings = db.get_referral_earnings(user_id)
         bonus_balance = db.get_bonus_balance(user_id)
         total_withdrawn = user['total_withdrawn'] if user['total_withdrawn'] else 0
-        cashback = db.get_cashback(user_id)
+        cashback = db.get_cashback_earned(user_id)
         text = (
             f"👤 <code>{user_id}</code>\n\n"
             f"📝 Имя: <b>{user['first_name'] or 'Не указано'}</b>\n"
@@ -1497,7 +1488,7 @@ def callback_handler(call):
             f"───────── ✧ ─────────\n\n"
             f"🎁 Бонусный баланс: <b>{bonus_balance:.2f} GMP</b>\n"
             f"💸 Всего выведено: <b>{total_withdrawn:.2f} GMP</b>\n"
-            f"💵 Кешбэк (всего): <b>{cashback:.2f} GMP</b>\n"
+            f"💳 Кешбэк накоплено: <b>{cashback:.2f} GMP</b>\n"
         )
         try:
             bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_to_main_keyboard())
@@ -1689,7 +1680,7 @@ def callback_handler(call):
             bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
         return
 
-    # Обработка оплаты платного кейса
+    # Обработка оплаты платного кейса (аналогична предыдущей, без изменений)
     if call.data == "paid_case_rub":
         price_rub = Config.PAID_CASE_PRICE_RUB
         order_id = db.create_order(user_id, "paid_case", price_rub, 0)
@@ -1745,7 +1736,7 @@ def callback_handler(call):
 
     if call.data == "paid_case_ton":
         price_ton = Config.PAID_CASE_PRICE_TON
-        asset = Config.GRAM_ASSET  # 'TON'
+        asset = Config.GRAM_ASSET
         invoice = crypto_pay.create_invoice(price_ton, 'USD', asset, f"Платный кейс (TON) для {user_id}")
         if not invoice:
             bot.answer_callback_query(call.id, "❌ Ошибка создания счёта!", show_alert=True)
@@ -1834,8 +1825,7 @@ def callback_handler(call):
             "💳 <b>Банковская карта</b> — надёжный способ\n"
             "💲 <b>Криптовалюта (USDT)</b> — быстро\n"
             "🪙 <b>Gram (TON)</b> — удобно\n\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
-            "💰 Кешбэк: до 4% от суммы покупки!"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>"
         )
         try:
             bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=payment_methods_keyboard())
@@ -1858,8 +1848,7 @@ def callback_handler(call):
             "💳 <b>Пополнение банковской картой</b>\n\n"
             f"💰 Цена 1 GMP = <b>{price:.2f} ₽</b>\n"
             f"📊 Мин. сумма: <b>{min_rub:.2f} ₽</b>, Макс. <b>{max_rub:.2f} ₽</b>\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
-            "💰 Кешбэк: до 4% от суммы покупки!\n\n"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>\n\n"
             "✏️ <b>Введите сумму в рублях</b>\n"
             "(можно дробные, например 100.50)"
         )
@@ -1883,8 +1872,7 @@ def callback_handler(call):
         text = (
             f"💲 <b>Пополнение криптовалютой ({asset})</b>\n\n"
             f"💰 Курс: 1 USD = <b>{rate:.2f} GMP</b>\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
-            "💰 Кешбэк: до 4% (только для рублёвых покупок)\n\n"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>\n\n"
             f"✏️ <b>Введите сумму в USD</b>\n"
             "(можно дробные, например 50.75)\n\n"
             f"💳 Валюта оплаты: <b>{asset}</b>"
@@ -1909,8 +1897,7 @@ def callback_handler(call):
         text = (
             f"🪙 <b>Пополнение Gram ({asset})</b>\n\n"
             f"💰 Курс: 1 {asset} = <b>{rate:.2f} GMP</b>\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
-            "💰 Кешбэк: до 4% (только для рублёвых покупок)\n\n"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>\n\n"
             f"✏️ <b>Введите сумму в {asset}</b>\n"
             "(можно дробные, например 1.5)\n\n"
             f"💳 Валюта оплаты: <b>{asset}</b>"
@@ -1945,6 +1932,7 @@ def callback_handler(call):
         if invoice.get('status') == 'paid':
             if order['status'] == 'pending':
                 if order['type'] == 'paid_case':
+                    # ... (платный кейс, уже есть)
                     rewards = db.get_paid_case_rewards()
                     if rewards:
                         rand_val = random.random() * 100
@@ -1986,8 +1974,6 @@ def callback_handler(call):
                         cur.execute('UPDATE users SET orders_count = orders_count + 1 WHERE user_id = ?', (user_id,))
                         conn.commit()
                         conn.close()
-                        # Начисление кешбэка для крипто-покупок не делаем (нет рублёвой суммы)
-                        # Реферальный бонус
                         user = db.get_user(user_id)
                         if user and user['referrer_id']:
                             referrer_id = user['referrer_id']
@@ -1999,7 +1985,7 @@ def callback_handler(call):
                                 try:
                                     bot.send_message(
                                         referrer_id,
-                                        f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP (криптовалюта)!\n"
+                                        f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP!\n"
                                         f"💰 Вы получили {bonus:.2f} GMP ({referral_percent}%)",
                                         parse_mode="HTML"
                                     )
@@ -2467,6 +2453,9 @@ def callback_handler(call):
         crypto_asset = Config.CRYPTO_ASSET
         gram_rate = Config.GRAM_RATE
         gram_asset = Config.GRAM_ASSET
+        # Покажем также общий кешбэк всех пользователей (суммарный)
+        cur.execute('SELECT SUM(cashback_earned) FROM users')
+        total_cashback = cur.fetchone()[0] or 0
         text = (
             "📊 <b>Статистика бота</b>\n\n"
             f"👥 Пользователей: <b>{total_users}</b>\n"
@@ -2478,6 +2467,7 @@ def callback_handler(call):
             f"💰 Выведено GMP: <b>{total_withdrawn:.2f}</b>\n"
             f"🚫 Заблокировано: <b>{total_banned}</b>\n"
             f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
+            f"💳 Кешбэк начислено всего: <b>{total_cashback:.2f} GMP</b>\n"
             f"{divider()}\n"
             f"💰 Цена 1 GMP: <b>{price:.2f} ₽</b>\n"
             f"💲 Курс USDT: 1 USD = <b>{crypto_rate:.2f} GMP</b>\n"
@@ -2510,7 +2500,7 @@ def callback_handler(call):
         bot.register_next_step_handler(call.message, handle_broadcast)
         return
 
-    # ========== АДМИН: ПОДТВЕРЖДЕНИЕ ЗАЯВОК (С НАЧИСЛЕНИЕМ КЕШБЭКА) ==========
+    # ========== АДМИН: ПОДТВЕРЖДЕНИЕ ЗАЯВОК (с кешбэком) ==========
     if call.data.startswith("admin_confirm_"):
         order_id = int(call.data.split("_")[2])
         order = db.get_order(order_id)
@@ -2519,6 +2509,7 @@ def callback_handler(call):
             return
 
         if order['type'] == 'paid_case':
+            # ... (платный кейс, без изменений)
             rewards = db.get_paid_case_rewards()
             if not rewards:
                 bot.answer_callback_query(call.id, "❌ Ошибка конфигурации кейса", show_alert=True)
@@ -2563,7 +2554,7 @@ def callback_handler(call):
             )
             return
 
-        # Обычная покупка GMP (рубли)
+        # ---- Обычная покупка GMP (рубли) ----
         if Config.TOTAL_GMP_AVAILABLE < order['gmp_amount']:
             bot.answer_callback_query(call.id, f"❌ Недостаточно GMP на складе! Доступно: {Config.TOTAL_GMP_AVAILABLE:.0f}", show_alert=True)
             return
@@ -2579,16 +2570,6 @@ def callback_handler(call):
         new_available = Config.TOTAL_GMP_AVAILABLE - order['gmp_amount']
         db.set_setting('TOTAL_GMP_AVAILABLE', new_available)
         sync_config_from_db()
-
-        # Начисление кешбэка
-        amount_rub = order['amount']  # сумма в рублях
-        cashback_percent = calculate_cashback(amount_rub)
-        # Кешбэк в GMP: (сумма_руб * процент / 100) / цена_за_GMP
-        cashback_gmp = (amount_rub * cashback_percent / 100) / Config.PRICE_PER_GMP_RUB
-        if cashback_gmp > 0:
-            db.update_bonus_balance(user_id_order, cashback_gmp, f"Кешбэк: +{cashback_gmp:.2f} GMP")
-            db.add_cashback(user_id_order, cashback_gmp)
-            logger.info(f"Начислен кешбэк {cashback_gmp:.2f} GMP пользователю {user_id_order}")
 
         # Реферальный бонус
         if user and user['referrer_id']:
@@ -2608,31 +2589,67 @@ def callback_handler(call):
                 except:
                     pass
 
+        # ---------- КЕШБЭК (только для рублёвых покупок) ----------
+        if order['type'] == 'rubles':
+            rub_amount = order['amount']  # сумма в рублях
+            percent = 0
+            if rub_amount < 100:
+                percent = 1
+            elif rub_amount < 1000:
+                percent = 2
+            elif rub_amount < 10000:
+                percent = 3
+            else:
+                percent = 4
+            cashback_rub = rub_amount * percent / 100
+            # Переводим в GMP по текущему курсу
+            price_per_gmp = Config.PRICE_PER_GMP_RUB
+            if price_per_gmp > 0:
+                cashback_gmp = cashback_rub / price_per_gmp
+                if cashback_gmp > 0:
+                    db.update_bonus_balance(user_id_order, cashback_gmp, f"Кешбэк: +{cashback_gmp:.2f} GMP за покупку #{order_id}")
+                    db.add_cashback(user_id_order, cashback_gmp)
+                    # Сохраняем в историю бонуса (уже сделано в update_bonus_balance)
+                    # Дополнительно отправим уведомление пользователю о кешбэке
+                    try:
+                        bot.send_message(
+                            user_id_order,
+                            f"💳 <b>Кешбэк за покупку!</b>\n"
+                            f"Вы получили <b>{cashback_gmp:.2f} GMP</b> ( {percent}% от {rub_amount:.2f} ₽ )\n"
+                            "Средства зачислены на бонусный баланс.",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
+            else:
+                logger.error("Цена GMP равна 0, кешбэк не начислен")
+
+        # Удаляем сообщения админа и пользователя
         admin_msg_id = order['admin_message_id'] if order['admin_message_id'] else None
         if admin_msg_id:
             safe_delete_message(Config.ADMIN_ID, admin_msg_id)
         user_msg_id = order['user_message_id'] if order['user_message_id'] else None
         if user_msg_id:
             safe_delete_message(user_id_order, user_msg_id)
+
         try:
             if not is_bot_itself(user_id_order):
                 text = (
                     f"✅ <b>Заявка #{order_id} одобрена!</b>\n\n"
                     f"💎 Куплено: <b>{order['gmp_amount']:.0f} GMP</b>\n"
-                    f"💰 Кешбэк: <b>{cashback_gmp:.2f} GMP</b> ({cashback_percent}%)\n"
                     "❤️ Спасибо за покупку!"
                 )
                 bot.send_message(user_id_order, text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Не удалось уведомить пользователя {user_id_order}: {e}")
+
         bot.answer_callback_query(call.id, "✅ Заявка подтверждена!")
         safe_edit_or_send(
             call.message.chat.id,
             call.message.message_id,
             f"✅ <b>Заявка #{order_id} выполнена</b>\n{divider()}\n"
             f"💎 Продано: <b>{order['gmp_amount']:.0f} GMP</b>\n"
-            f"👤 Покупатель: {username}\n"
-            f"💰 Кешбэк: {cashback_gmp:.2f} GMP",
+            f"👤 Покупатель: {username}",
             parse_mode="HTML",
             reply_markup=back_to_main_keyboard()
         )
