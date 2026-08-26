@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ========== КОНФИГУРАЦИЯ ==========
 class Config:
     BOT_TOKEN = "8553271912:AAEKVRL2bwjY3RO4X9cS7ITeDQ_PfBLfpKc"
-    ADMIN_ID = 5356400377  # замените на свой
+    ADMIN_ID = 5356400377
 
     CHANNEL_LINK = "https://t.me/gmp_owner"
     CHANNEL_ID = "@gmp_owner"
@@ -41,7 +41,6 @@ class Config:
     CRYPTO_PAY_TOKEN = "521377:AAx2ftqZQuV65i7lPPaJHbSlYe8zN8p4LGT"
     CRYPTO_PAY_API = "https://pay.crypt.bot/api"
 
-    # Начальные значения (будут перезаписаны из БД)
     PRICE_PER_GMP_RUB = 0.3
     MIN_RUB_AMOUNT = 1
     MAX_RUB_AMOUNT = 50000
@@ -60,12 +59,10 @@ class Config:
     DB_PATH = "bot_database.db"
     NAZVANIA = "GMP от owner"
 
-    # Настройки бесплатного кейса
     CASE_COOLDOWN_MINUTES = 1440
     MIN_CASE_REWARD = 1
     MAX_CASE_REWARD = 2
 
-    # Настройки платного кейса
     PAID_CASE_PRICE_RUB = 50
     PAID_CASE_PRICE_USD = 0.625
     PAID_CASE_PRICE_TON = 0.4
@@ -80,18 +77,6 @@ class Config:
     MIN_WITHDRAW_GMP = 20
     MIN_REFERRALS_FOR_WITHDRAW = 1
     REFERRAL_PERCENT = 10
-
-    # Настройки ивента (будут в БД)
-    EVENT_ACTIVE = False
-    EVENT_START = None
-    EVENT_END = None
-    EVENT_BONUS_PERCENT = 7
-    EVENT_TASKS = [
-        {"threshold": 1000, "bonus": 77},
-        {"threshold": 2000, "bonus": 170},
-        {"threshold": 6000, "bonus": 500},
-        {"threshold": 10000, "bonus": 999}
-    ]
 
 
 class Database:
@@ -121,7 +106,8 @@ class Database:
                 referral_code TEXT,
                 referral_earnings REAL DEFAULT 0,
                 last_case_open TIMESTAMP DEFAULT NULL,
-                total_withdrawn REAL DEFAULT 0
+                total_withdrawn REAL DEFAULT 0,
+                cashback REAL DEFAULT 0
             )
         ''')
 
@@ -201,22 +187,6 @@ class Database:
             )
         ''')
 
-        # Таблицы для ивента
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS event_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        ''')
-
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS event_progress (
-                user_id INTEGER PRIMARY KEY,
-                total_purchased REAL DEFAULT 0,
-                claimed_bonuses TEXT DEFAULT '[]'
-            )
-        ''')
-
         conn.commit()
         conn.close()
         logger.info("База данных инициализирована")
@@ -225,15 +195,18 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
-        # Проверяем существующие таблицы и колонки (как раньше)
         cur.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in cur.fetchall()]
+
         if 'total_withdrawn' not in columns:
             cur.execute("ALTER TABLE users ADD COLUMN total_withdrawn REAL DEFAULT 0")
         if 'referral_earnings' not in columns:
             cur.execute("ALTER TABLE users ADD COLUMN referral_earnings REAL DEFAULT 0")
         if 'last_case_open' not in columns:
             cur.execute("ALTER TABLE users ADD COLUMN last_case_open TIMESTAMP DEFAULT NULL")
+        if 'cashback' not in columns:
+            cur.execute("ALTER TABLE users ADD COLUMN cashback REAL DEFAULT 0")
+            logger.info("Добавлена колонка cashback в users")
 
         cur.execute("PRAGMA table_info(orders)")
         columns = [col[1] for col in cur.fetchall()]
@@ -245,7 +218,6 @@ class Database:
         if 'banned_by' not in columns:
             cur.execute("ALTER TABLE banned_users ADD COLUMN banned_by INTEGER DEFAULT NULL")
 
-        # Проверяем наличие настроек в settings
         cur.execute("SELECT key FROM settings")
         existing_keys = [row[0] for row in cur.fetchall()]
 
@@ -278,28 +250,11 @@ class Database:
             if key not in existing_keys:
                 cur.execute('INSERT INTO settings (key, value) VALUES (?, ?)', (key, value))
 
-        # Инициализация настроек ивента
-        cur.execute("SELECT key FROM event_settings")
-        event_keys = [row[0] for row in cur.fetchall()]
-
-        event_defaults = {
-            'event_active': '0',
-            'event_start': '',
-            'event_end': '',
-            'event_bonus_percent': str(Config.EVENT_BONUS_PERCENT),
-            'event_tasks': json.dumps(Config.EVENT_TASKS)
-        }
-
-        for key, value in event_defaults.items():
-            if key not in event_keys:
-                cur.execute('INSERT INTO event_settings (key, value) VALUES (?, ?)', (key, value))
-
         conn.commit()
         conn.close()
         logger.info("Миграция базы данных завершена")
 
     def init_settings(self):
-        # Инициализация основных настроек (как раньше)
         defaults = {
             'PRICE_PER_GMP_RUB': str(Config.PRICE_PER_GMP_RUB),
             'MIN_RUB_AMOUNT': str(Config.MIN_RUB_AMOUNT),
@@ -331,7 +286,6 @@ class Database:
         conn.commit()
         conn.close()
 
-    # ---------- МЕТОДЫ ДЛЯ РАБОТЫ С НАСТРОЙКАМИ ----------
     def get_setting(self, key):
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -373,139 +327,29 @@ class Database:
     def set_paid_case_rewards(self, rewards):
         self.set_setting('PAID_CASE_REWARDS', json.dumps(rewards))
 
-    # ---------- МЕТОДЫ ДЛЯ ИВЕНТА ----------
-    def get_event_setting(self, key):
+    # ---------- ДОПОЛНИТЕЛЬНЫЙ МЕТОД ДЛЯ КЕШБЭКА ----------
+    def add_cashback(self, user_id, amount):
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        cur.execute('SELECT value FROM event_settings WHERE key = ?', (key,))
+        cur.execute('UPDATE users SET cashback = cashback + ? WHERE user_id = ?', (amount, user_id))
+        conn.commit()
+        conn.close()
+
+    def get_cashback(self, user_id):
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('SELECT cashback FROM users WHERE user_id = ?', (user_id,))
         result = cur.fetchone()
         conn.close()
-        return result[0] if result else None
+        return result[0] if result else 0
 
-    def set_event_setting(self, key, value):
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute('INSERT OR REPLACE INTO event_settings (key, value) VALUES (?, ?)', (key, str(value)))
-        conn.commit()
-        conn.close()
-
-    def is_event_active(self):
-        active = self.get_event_setting('event_active')
-        if active != '1':
-            return False
-        start_str = self.get_event_setting('event_start')
-        end_str = self.get_event_setting('event_end')
-        if not start_str or not end_str:
-            return False
-        try:
-            start = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
-            end = datetime.strptime(end_str, '%Y-%m-%d %H:%M:%S')
-            now = datetime.now()
-            if now < start or now > end:
-                # Автоматически отключаем, если время истекло
-                self.set_event_setting('event_active', '0')
-                return False
-            return True
-        except:
-            return False
-
-    def start_event(self, days=4):
-        now = datetime.now()
-        end = now + timedelta(days=days)
-        self.set_event_setting('event_active', '1')
-        self.set_event_setting('event_start', now.strftime('%Y-%m-%d %H:%M:%S'))
-        self.set_event_setting('event_end', end.strftime('%Y-%m-%d %H:%M:%S'))
-        logger.info(f"Ивент запущен до {end.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    def stop_event(self):
-        self.set_event_setting('event_active', '0')
-        logger.info("Ивент остановлен")
-
-    def get_event_bonus_percent(self):
-        val = self.get_event_setting('event_bonus_percent')
-        try:
-            return float(val)
-        except:
-            return 7.0
-
-    def set_event_bonus_percent(self, percent):
-        self.set_event_setting('event_bonus_percent', str(percent))
-
-    def get_event_tasks(self):
-        val = self.get_event_setting('event_tasks')
-        if val:
-            try:
-                return json.loads(val)
-            except:
-                return Config.EVENT_TASKS
-        return Config.EVENT_TASKS
-
-    def set_event_tasks(self, tasks):
-        self.set_event_setting('event_tasks', json.dumps(tasks))
-
-    def get_event_progress(self, user_id):
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute('SELECT total_purchased, claimed_bonuses FROM event_progress WHERE user_id = ?', (user_id,))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            return row[0], json.loads(row[1])
-        else:
-            return 0, []
-
-    def update_event_progress(self, user_id, amount):
-        # amount – сколько GMP куплено (добавляем к total_purchased)
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute('INSERT INTO event_progress (user_id, total_purchased, claimed_bonuses) VALUES (?, ?, ?) '
-                     'ON CONFLICT(user_id) DO UPDATE SET total_purchased = total_purchased + ?',
-                     (user_id, amount, '[]', amount))
-        conn.commit()
-        conn.close()
-        # Теперь получаем обновлённый прогресс и проверяем задания
-        total, claimed = self.get_event_progress(user_id)
-        tasks = self.get_event_tasks()
-        new_bonuses = []
-        for task in tasks:
-            threshold = task['threshold']
-            bonus_gmp = task['bonus']
-            if total >= threshold and threshold not in claimed:
-                # Начисляем бонус
-                self.update_bonus_balance(user_id, bonus_gmp, f"Бонус задания ивента: +{bonus_gmp} GMP (порог {threshold})")
-                claimed.append(threshold)
-                new_bonuses.append(bonus_gmp)
-        # Обновляем claimed_bonuses
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute('UPDATE event_progress SET claimed_bonuses = ? WHERE user_id = ?', (json.dumps(claimed), user_id))
-        conn.commit()
-        conn.close()
-        return new_bonuses
-
-    def reset_event_progress(self):
-        # Очистка прогресса при завершении ивента (опционально)
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute('DELETE FROM event_progress')
-        conn.commit()
-        conn.close()
-
-    def add_random_bonus(self, user_id, order_amount):
-        # Генерирует случайный бонус до 5% от order_amount и начисляет
-        percent = random.uniform(0, 5)
-        bonus = order_amount * (percent / 100)
-        if bonus > 0:
-            self.update_bonus_balance(user_id, bonus, f"Рандомный бонус ивента: +{bonus:.2f} GMP ({percent:.1f}%)")
-        return bonus, percent
-
-    # ---------- ОСТАЛЬНЫЕ МЕТОДЫ (без изменений) ----------
+    # ---------- ОСТАЛЬНЫЕ МЕТОДЫ ----------
     def export_all_to_dict(self):
         data = {}
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings', 'event_settings', 'event_progress']
+        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings']
         for table in tables:
             cur.execute(f'SELECT * FROM {table}')
             rows = cur.fetchall()
@@ -517,7 +361,7 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute('PRAGMA foreign_keys = OFF')
-        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings', 'event_settings', 'event_progress']
+        tables = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings']
         for table in tables:
             cur.execute(f'DELETE FROM {table}')
             rows = data.get(table, [])
@@ -532,7 +376,7 @@ class Database:
         conn.commit()
         conn.close()
 
-    # ---------- МЕТОДЫ ПОЛЬЗОВАТЕЛЕЙ (как раньше) ----------
+    # ---------- ОСНОВНЫЕ МЕТОДЫ ----------
     def get_user(self, user_id):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -922,7 +766,7 @@ class CryptoPay:
             return None
 
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 db = Database(Config.DB_PATH)
 bot = telebot.TeleBot(Config.BOT_TOKEN)
 crypto_pay = CryptoPay(Config.CRYPTO_PAY_TOKEN)
@@ -938,8 +782,22 @@ def sync_config_from_db():
         Config.MIN_REFERRALS_FOR_WITHDRAW = db.get_setting_int('MIN_REFERRALS_FOR_WITHDRAW')
         Config.REFERRAL_PERCENT = db.get_setting_float('REFERRAL_PERCENT')
         Config.CASE_COOLDOWN_MINUTES = db.get_setting_int('CASE_COOLDOWN_MINUTES')
-        Config.MIN_CASE_REWARD = db.get_setting_int('MIN_CASE_REWARD')
-        Config.MAX_CASE_REWARD = db.get_setting_int('MAX_CASE_REWARD')
+        
+        min_reward = db.get_setting_int('MIN_CASE_REWARD')
+        max_reward = db.get_setting_int('MAX_CASE_REWARD')
+        if min_reward > max_reward:
+            db.set_setting('MIN_CASE_REWARD', max_reward)
+            db.set_setting('MAX_CASE_REWARD', min_reward)
+            min_reward, max_reward = max_reward, min_reward
+        if min_reward < 1:
+            db.set_setting('MIN_CASE_REWARD', 1)
+            min_reward = 1
+        if max_reward < min_reward:
+            db.set_setting('MAX_CASE_REWARD', min_reward + 1)
+            max_reward = min_reward + 1
+        Config.MIN_CASE_REWARD = min_reward
+        Config.MAX_CASE_REWARD = max_reward
+
         Config.TOTAL_GMP_AVAILABLE = db.get_setting_float('TOTAL_GMP_AVAILABLE')
         Config.CRYPTO_RATE = db.get_setting_float('CRYPTO_RATE')
         Config.CRYPTO_ASSET = db.get_setting('CRYPTO_ASSET') or Config.CRYPTO_ASSET
@@ -952,11 +810,6 @@ def sync_config_from_db():
         Config.PHONE_NUMBER = db.get_setting('PHONE_NUMBER') or Config.PHONE_NUMBER
         Config.BANK_NAME = db.get_setting('BANK_NAME') or Config.BANK_NAME
         Config.RECIPIENT_NAME = db.get_setting('RECIPIENT_NAME') or Config.RECIPIENT_NAME
-
-        # Загружаем настройки ивента
-        Config.EVENT_ACTIVE = db.is_event_active()
-        # Остальные параметры ивента загружаются при необходимости
-
         return True
     except Exception as e:
         logger.error(f"Ошибка синхронизации: {e}")
@@ -1093,6 +946,18 @@ def start_withdraw_process(chat_id, user_id, message_id=None):
             pass
     bot.register_next_step_handler(msg, handle_withdraw_amount)
 
+# ========== ФУНКЦИЯ ДЛЯ НАЧИСЛЕНИЯ КЕШБЭКА ==========
+def calculate_cashback(amount_rub):
+    """Возвращает процент кешбэка в зависимости от суммы в рублях"""
+    if amount_rub < 100:
+        return 1.0
+    elif amount_rub < 1000:
+        return 2.0
+    elif amount_rub < 10000:
+        return 3.0
+    else:
+        return 4.0
+
 # ========== ПРОВЕРКА КРИПТО-ПЛАТЕЖЕЙ (ФОН) ==========
 def check_crypto_payments():
     while True:
@@ -1149,6 +1014,16 @@ def check_crypto_payments():
                                 conn.commit()
                                 conn.close()
 
+                                # Начисляем кешбэк (если сумма покупки в рублях известна)
+                                # Для крипто-покупок сумма в USD, но у нас есть amount (USD). Нужно перевести в рубли?
+                                # В заказе для крипты amount – это сумма в USD. Мы можем использовать amount * курс_USD_to_RUB,
+                                # но у нас нет курса USD/RUB. Поэтому для крипто-покупок кешбэк не начисляем (или начисляем от USD?).
+                                # По условию кешбэк зависит от суммы в рублях, поэтому для крипто-платежей проще не начислять,
+                                # либо пересчитывать по рыночному курсу. Но мы не знаем курс. Пропустим начисление кешбэка для крипты.
+                                # Однако можно использовать приблизительный курс, но лучше добавить настройку курса USD/RUB.
+                                # Для простоты оставим так, как есть. В будущем можно добавить курс.
+
+                                # Реферальный бонус
                                 user = db.get_user(user_id)
                                 if user and user['referrer_id']:
                                     referrer_id = user['referrer_id']
@@ -1162,27 +1037,6 @@ def check_crypto_payments():
                                                 referrer_id,
                                                 f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP (криптовалюта)!\n"
                                                 f"💰 Вы получили {bonus:.2f} GMP ({referral_percent}%)",
-                                                parse_mode="HTML"
-                                            )
-                                        except:
-                                            pass
-
-                                # ---- ИВЕНТ: бонус 7% и задания ----
-                                if db.is_event_active():
-                                    # 1. Бонус 7%
-                                    event_bonus_percent = db.get_event_bonus_percent()
-                                    extra_bonus = gmp_amount * (event_bonus_percent / 100)
-                                    if extra_bonus > 0:
-                                        db.update_bonus_balance(user_id, extra_bonus, f"Бонус ивента 7%: +{extra_bonus:.2f} GMP")
-                                    # 2. Задания
-                                    task_bonuses = db.update_event_progress(user_id, gmp_amount)
-                                    if task_bonuses:
-                                        task_text = ", ".join([f"+{b} GMP" for b in task_bonuses])
-                                        try:
-                                            bot.send_message(
-                                                user_id,
-                                                f"🎉 <b>Вы выполнили задание ивента!</b>\n"
-                                                f"Получено: {task_text}",
                                                 parse_mode="HTML"
                                             )
                                         except:
@@ -1254,14 +1108,13 @@ def admin_panel_keyboard():
     btn8 = types.InlineKeyboardButton("💳 Реквизиты карты", callback_data="admin_card_details")
     btn9 = types.InlineKeyboardButton("💾 Сохранение", callback_data="admin_backup")
     btn10 = types.InlineKeyboardButton("🎰 Настройка платного кейса", callback_data="admin_paid_case_settings")
-    btn11 = types.InlineKeyboardButton("🎉 Управление ивентом", callback_data="admin_event_management")
-    btn12 = types.InlineKeyboardButton("↩️ Назад", callback_data="back_to_main")
+    btn11 = types.InlineKeyboardButton("↩️ Назад", callback_data="back_to_main")
     keyboard.add(btn1, btn2)
     keyboard.add(btn3, btn4)
     keyboard.add(btn5, btn6)
     keyboard.add(btn7, btn8)
     keyboard.add(btn9, btn10)
-    keyboard.add(btn11, btn12)
+    keyboard.add(btn11)
     return keyboard
 
 def payment_methods_keyboard():
@@ -1407,18 +1260,6 @@ def backup_keyboard():
     keyboard.add(btn1, btn2, btn3)
     return keyboard
 
-# Дополнительная клавиатура для управления ивентом
-def event_management_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    btn1 = types.InlineKeyboardButton("▶️ Запустить ивент (на 4 дня)", callback_data="admin_event_start")
-    btn2 = types.InlineKeyboardButton("⏹ Остановить ивент", callback_data="admin_event_stop")
-    btn3 = types.InlineKeyboardButton("📊 Статус ивента", callback_data="admin_event_status")
-    btn4 = types.InlineKeyboardButton("⚙️ Настройки ивента", callback_data="admin_event_settings")
-    btn5 = types.InlineKeyboardButton("↩️ Назад", callback_data="admin_panel")
-    keyboard.add(btn1, btn2)
-    keyboard.add(btn3, btn4)
-    keyboard.add(btn5)
-    return keyboard
 
 # ========== ФУНКЦИЯ ПОКАЗА ГЛАВНОГО МЕНЮ ==========
 def show_main_menu(chat_id, message_id=None):
@@ -1455,7 +1296,8 @@ def show_main_menu(chat_id, message_id=None):
         " • Пополнение банковской картой\n"
         " • Пополнение криптовалютой (USDT, TON)\n"
         " • Вывод бонусного баланса\n"
-        " • Бесплатные и платные кейсы\n\n"
+        " • Бесплатные и платные кейсы\n"
+        " • Кешбэк до 4% за покупки\n\n"
         "✨ <b>Выбери действие ниже:</b>"
     )
     markup = main_menu_keyboard(user_id)
@@ -1549,7 +1391,7 @@ def handle_import_doc(message):
         downloaded_file = bot.download_file(file_info.file_path)
         json_str = downloaded_file.decode('utf-8')
         data = json.loads(json_str)
-        required = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings', 'event_settings', 'event_progress']
+        required = ['users', 'orders', 'bonus_balance', 'bonus_history', 'banned_users', 'referrals', 'withdraw_requests', 'settings']
         if not all(table in data for table in required):
             bot.reply_to(message, "❌ Неверный формат файла!")
             return
@@ -1644,6 +1486,7 @@ def callback_handler(call):
         referral_earnings = db.get_referral_earnings(user_id)
         bonus_balance = db.get_bonus_balance(user_id)
         total_withdrawn = user['total_withdrawn'] if user['total_withdrawn'] else 0
+        cashback = db.get_cashback(user_id)
         text = (
             f"👤 <code>{user_id}</code>\n\n"
             f"📝 Имя: <b>{user['first_name'] or 'Не указано'}</b>\n"
@@ -1654,6 +1497,7 @@ def callback_handler(call):
             f"───────── ✧ ─────────\n\n"
             f"🎁 Бонусный баланс: <b>{bonus_balance:.2f} GMP</b>\n"
             f"💸 Всего выведено: <b>{total_withdrawn:.2f} GMP</b>\n"
+            f"💵 Кешбэк (всего): <b>{cashback:.2f} GMP</b>\n"
         )
         try:
             bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_to_main_keyboard())
@@ -1739,48 +1583,59 @@ def callback_handler(call):
         return
 
     if call.data == "open_case":
-        last_open = db.get_last_case_open(user_id)
-        cooldown_minutes = Config.CASE_COOLDOWN_MINUTES
-        if last_open:
-            try:
-                last_open_dt = datetime.strptime(last_open, '%Y-%m-%d %H:%M:%S')
-                time_passed = datetime.now() - last_open_dt
-                seconds_passed = time_passed.total_seconds()
-                if seconds_passed < cooldown_minutes * 60:
-                    remaining_seconds = int(cooldown_minutes * 60 - seconds_passed)
-                    time_str = format_time_remaining(remaining_seconds)
-                    bot.answer_callback_query(call.id, f"⏳ Кейс будет доступен через: {time_str}", show_alert=True)
-                    return
-            except Exception as e:
-                logger.error(f"Ошибка обработки last_case_open: {e}")
-        min_reward = Config.MIN_CASE_REWARD
-        max_reward = Config.MAX_CASE_REWARD
-        reward = random.randint(min_reward, max_reward)
-        db.update_bonus_balance(user_id, reward, f"Бесплатный кейс: +{reward} GMP")
-        db.update_last_case_open(user_id)
-        user = db.get_user(user_id)
-        if user and user['referrer_id']:
-            referrer_id = user['referrer_id']
-            referral_percent = Config.REFERRAL_PERCENT
-            referral_earnings = reward * (referral_percent / 100)
-            db.update_bonus_balance(referrer_id, referral_earnings, f"Реферал: +{referral_earnings:.2f} GMP")
-            db.add_referral_earnings(referrer_id, referral_earnings)
-            try:
-                bot.send_message(
-                    referrer_id,
-                    f"🎉 Ваш реферал открыл бесплатный кейс!\n"
-                    f"💰 Вы получили {referral_earnings:.2f} GMP ({referral_percent}% от {reward} GMP)",
-                    parse_mode="HTML"
-                )
-            except:
-                pass
-        text = f"🎉 <b>Поздравляю!</b>\n\n💰 <b>+{reward} GMP</b>\n🔥 Продолжай в том же духе!"
         try:
-            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=case_keyboard())
+            last_open = db.get_last_case_open(user_id)
+            cooldown_minutes = Config.CASE_COOLDOWN_MINUTES
+            if last_open:
+                try:
+                    last_open_dt = datetime.strptime(last_open, '%Y-%m-%d %H:%M:%S')
+                    time_passed = datetime.now() - last_open_dt
+                    seconds_passed = time_passed.total_seconds()
+                    if seconds_passed < cooldown_minutes * 60:
+                        remaining_seconds = int(cooldown_minutes * 60 - seconds_passed)
+                        time_str = format_time_remaining(remaining_seconds)
+                        bot.answer_callback_query(call.id, f"⏳ Кейс будет доступен через: {time_str}", show_alert=True)
+                        return
+                except Exception as e:
+                    logger.error(f"Ошибка обработки last_case_open: {e}")
+            min_reward = Config.MIN_CASE_REWARD
+            max_reward = Config.MAX_CASE_REWARD
+            if min_reward > max_reward:
+                min_reward, max_reward = max_reward, min_reward
+            if min_reward < 1:
+                min_reward = 1
+            if max_reward < min_reward:
+                max_reward = min_reward + 1
+            reward = random.randint(min_reward, max_reward)
+            db.update_bonus_balance(user_id, reward, f"Бесплатный кейс: +{reward} GMP")
+            db.update_last_case_open(user_id)
+            user = db.get_user(user_id)
+            if user and user['referrer_id']:
+                referrer_id = user['referrer_id']
+                referral_percent = Config.REFERRAL_PERCENT
+                referral_earnings = reward * (referral_percent / 100)
+                db.update_bonus_balance(referrer_id, referral_earnings, f"Реферал: +{referral_earnings:.2f} GMP")
+                db.add_referral_earnings(referrer_id, referral_earnings)
+                try:
+                    bot.send_message(
+                        referrer_id,
+                        f"🎉 Ваш реферал открыл бесплатный кейс!\n"
+                        f"💰 Вы получили {referral_earnings:.2f} GMP ({referral_percent}% от {reward} GMP)",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+            text = f"🎉 <b>Поздравляю!</b>\n\n💰 <b>+{reward} GMP</b>\n🔥 Продолжай в том же духе!"
+            try:
+                bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=case_keyboard())
+            except Exception as e:
+                if "message is not modified" not in str(e):
+                    logger.error(f"Ошибка open_case: {e}")
+                bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=case_keyboard())
+            bot.answer_callback_query(call.id, f"✅ Вы получили {reward} GMP!")
         except Exception as e:
-            if "message is not modified" not in str(e):
-                logger.error(f"Ошибка open_case: {e}")
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=case_keyboard())
+            logger.error(f"Критическая ошибка при открытии кейса: {e}")
+            bot.answer_callback_query(call.id, "❌ Произошла ошибка при открытии кейса. Попробуйте позже.", show_alert=True)
         return
 
     if call.data == "what_is_case":
@@ -1834,6 +1689,7 @@ def callback_handler(call):
             bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
         return
 
+    # Обработка оплаты платного кейса
     if call.data == "paid_case_rub":
         price_rub = Config.PAID_CASE_PRICE_RUB
         order_id = db.create_order(user_id, "paid_case", price_rub, 0)
@@ -1889,7 +1745,7 @@ def callback_handler(call):
 
     if call.data == "paid_case_ton":
         price_ton = Config.PAID_CASE_PRICE_TON
-        asset = Config.GRAM_ASSET
+        asset = Config.GRAM_ASSET  # 'TON'
         invoice = crypto_pay.create_invoice(price_ton, 'USD', asset, f"Платный кейс (TON) для {user_id}")
         if not invoice:
             bot.answer_callback_query(call.id, "❌ Ошибка создания счёта!", show_alert=True)
@@ -1978,7 +1834,8 @@ def callback_handler(call):
             "💳 <b>Банковская карта</b> — надёжный способ\n"
             "💲 <b>Криптовалюта (USDT)</b> — быстро\n"
             "🪙 <b>Gram (TON)</b> — удобно\n\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
+            "💰 Кешбэк: до 4% от суммы покупки!"
         )
         try:
             bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=payment_methods_keyboard())
@@ -2001,7 +1858,8 @@ def callback_handler(call):
             "💳 <b>Пополнение банковской картой</b>\n\n"
             f"💰 Цена 1 GMP = <b>{price:.2f} ₽</b>\n"
             f"📊 Мин. сумма: <b>{min_rub:.2f} ₽</b>, Макс. <b>{max_rub:.2f} ₽</b>\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>\n\n"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
+            "💰 Кешбэк: до 4% от суммы покупки!\n\n"
             "✏️ <b>Введите сумму в рублях</b>\n"
             "(можно дробные, например 100.50)"
         )
@@ -2025,7 +1883,8 @@ def callback_handler(call):
         text = (
             f"💲 <b>Пополнение криптовалютой ({asset})</b>\n\n"
             f"💰 Курс: 1 USD = <b>{rate:.2f} GMP</b>\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>\n\n"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
+            "💰 Кешбэк: до 4% (только для рублёвых покупок)\n\n"
             f"✏️ <b>Введите сумму в USD</b>\n"
             "(можно дробные, например 50.75)\n\n"
             f"💳 Валюта оплаты: <b>{asset}</b>"
@@ -2050,7 +1909,8 @@ def callback_handler(call):
         text = (
             f"🪙 <b>Пополнение Gram ({asset})</b>\n\n"
             f"💰 Курс: 1 {asset} = <b>{rate:.2f} GMP</b>\n"
-            f"📦 Доступно GMP: <b>{available:.0f}</b>\n\n"
+            f"📦 Доступно GMP: <b>{available:.0f}</b>\n"
+            "💰 Кешбэк: до 4% (только для рублёвых покупок)\n\n"
             f"✏️ <b>Введите сумму в {asset}</b>\n"
             "(можно дробные, например 1.5)\n\n"
             f"💳 Валюта оплаты: <b>{asset}</b>"
@@ -2083,7 +1943,6 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "❌ Не удалось проверить оплату. Попробуйте позже.", show_alert=True)
             return
         if invoice.get('status') == 'paid':
-            # Если заказ ещё не обработан, запускаем ручную обработку
             if order['status'] == 'pending':
                 if order['type'] == 'paid_case':
                     rewards = db.get_paid_case_rewards()
@@ -2127,6 +1986,8 @@ def callback_handler(call):
                         cur.execute('UPDATE users SET orders_count = orders_count + 1 WHERE user_id = ?', (user_id,))
                         conn.commit()
                         conn.close()
+                        # Начисление кешбэка для крипто-покупок не делаем (нет рублёвой суммы)
+                        # Реферальный бонус
                         user = db.get_user(user_id)
                         if user and user['referrer_id']:
                             referrer_id = user['referrer_id']
@@ -2138,28 +1999,8 @@ def callback_handler(call):
                                 try:
                                     bot.send_message(
                                         referrer_id,
-                                        f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP!\n"
+                                        f"🎉 Ваш реферал совершил покупку на {gmp_amount:.0f} GMP (криптовалюта)!\n"
                                         f"💰 Вы получили {bonus:.2f} GMP ({referral_percent}%)",
-                                        parse_mode="HTML"
-                                    )
-                                except:
-                                    pass
-                        # ---- ИВЕНТ ----
-                        if db.is_event_active():
-                            # 7% бонус
-                            event_bonus_percent = db.get_event_bonus_percent()
-                            extra_bonus = gmp_amount * (event_bonus_percent / 100)
-                            if extra_bonus > 0:
-                                db.update_bonus_balance(user_id, extra_bonus, f"Бонус ивента 7%: +{extra_bonus:.2f} GMP")
-                            # Задания
-                            task_bonuses = db.update_event_progress(user_id, gmp_amount)
-                            if task_bonuses:
-                                task_text = ", ".join([f"+{b} GMP" for b in task_bonuses])
-                                try:
-                                    bot.send_message(
-                                        user_id,
-                                        f"🎉 <b>Вы выполнили задание ивента!</b>\n"
-                                        f"Получено: {task_text}",
                                         parse_mode="HTML"
                                     )
                                 except:
@@ -2201,130 +2042,6 @@ def callback_handler(call):
             if "message is not modified" not in str(e):
                 logger.error(f"Ошибка admin_panel: {e}")
             bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=admin_panel_keyboard())
-        return
-
-    # ====== АДМИН: УПРАВЛЕНИЕ ИВЕНТОМ ======
-    if call.data == "admin_event_management":
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
-            return
-        text = "🎉 <b>Управление ивентом к 1 сентября</b>"
-        try:
-            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=event_management_keyboard())
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                logger.error(f"Ошибка admin_event_management: {e}")
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=event_management_keyboard())
-        return
-
-    if call.data == "admin_event_start":
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
-            return
-        if db.is_event_active():
-            bot.answer_callback_query(call.id, "❌ Ивент уже активен!", show_alert=True)
-            return
-        db.start_event(4)  # на 4 дня
-        sync_config_from_db()
-        bot.answer_callback_query(call.id, "✅ Ивент запущен на 4 дня!", show_alert=True)
-        # Уведомление всем пользователям
-        conn = sqlite3.connect(Config.DB_PATH)
-        cur = conn.cursor()
-        cur.execute('SELECT user_id FROM users')
-        users = cur.fetchall()
-        conn.close()
-        for user in users:
-            try:
-                bot.send_message(
-                    user[0],
-                    "🎉 <b>Ивент к 1 сентября запущен!</b>\n\n"
-                    "🔥 <b>Бонус 7%</b> на все покупки GMP!\n"
-                    "📊 <b>Задания:</b>\n"
-                    "   • 1000 GMP → +77 GMP\n"
-                    "   • 2000 GMP → +170 GMP\n"
-                    "   • 6000 GMP → +500 GMP\n"
-                    "   • 10000 GMP → +999 GMP\n\n"
-                    "⏰ Ивент действует 4 дня!\n"
-                    "💪 Успейте заработать больше!",
-                    parse_mode="HTML"
-                )
-            except:
-                pass
-        # Обновить сообщение в админ-панели
-        safe_edit_or_send(chat_id, message_id, "🎉 Ивент запущен!", parse_mode="HTML", reply_markup=event_management_keyboard())
-        return
-
-    if call.data == "admin_event_stop":
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
-            return
-        db.stop_event()
-        sync_config_from_db()
-        bot.answer_callback_query(call.id, "⏹ Ивент остановлен!", show_alert=True)
-        safe_edit_or_send(chat_id, message_id, "⏹ Ивент остановлен.", parse_mode="HTML", reply_markup=event_management_keyboard())
-        return
-
-    if call.data == "admin_event_status":
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
-            return
-        active = db.is_event_active()
-        start_str = db.get_event_setting('event_start')
-        end_str = db.get_event_setting('event_end')
-        bonus = db.get_event_bonus_percent()
-        tasks = db.get_event_tasks()
-        tasks_text = "\n".join([f"   {t['threshold']} GMP → +{t['bonus']} GMP" for t in tasks])
-        if active:
-            status = "✅ Активен"
-            remaining = ""
-            if end_str:
-                try:
-                    end_dt = datetime.strptime(end_str, '%Y-%m-%d %H:%M:%S')
-                    now = datetime.now()
-                    delta = end_dt - now
-                    if delta.total_seconds() > 0:
-                        remaining = f"\n⏳ Осталось: {format_time_remaining(delta.total_seconds())}"
-                except:
-                    pass
-        else:
-            status = "❌ Неактивен"
-            remaining = ""
-        text = (
-            f"📊 <b>Статус ивента</b>\n"
-            f"Состояние: {status}{remaining}\n\n"
-            f"🎁 Бонус: {bonus}%\n"
-            f"📋 Задания:\n{tasks_text}\n\n"
-            f"📅 Старт: {format_date(start_str)}\n"
-            f"📅 Финиш: {format_date(end_str)}"
-        )
-        try:
-            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=event_management_keyboard())
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                logger.error(f"Ошибка admin_event_status: {e}")
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=event_management_keyboard())
-        return
-
-    if call.data == "admin_event_settings":
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, "⛔ У вас нет прав!", show_alert=True)
-            return
-        text = (
-            "⚙️ <b>Настройки ивента</b>\n\n"
-            "Введите номер параметра для изменения:\n"
-            "1 - Бонусный процент (сейчас {})\n"
-            "2 - Задания (формат: порог:бонус, порог:бонус, ...)\n"
-            "   Пример: 1000:77, 2000:170, 6000:500, 10000:999\n\n"
-            "Текущие задания:\n{}"
-        ).format(db.get_event_bonus_percent(),
-                 "\n".join([f"   {t['threshold']} → +{t['bonus']}" for t in db.get_event_tasks()]))
-        try:
-            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_to_main_keyboard())
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                logger.error(f"Ошибка admin_event_settings: {e}")
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=back_to_main_keyboard())
-        bot.register_next_step_handler(call.message, handle_admin_event_settings)
         return
 
     # ====== АДМИН: НАСТРОЙКА ПЛАТНОГО КЕЙСА ======
@@ -2665,10 +2382,9 @@ def callback_handler(call):
             btn_confirm = types.InlineKeyboardButton("✅ Выполнить", callback_data=f"admin_confirm_{order_id}")
             btn_cancel = types.InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_cancel_{order_id}")
             btn_screenshot = types.InlineKeyboardButton("🖼 Скрин", callback_data=f"admin_order_screenshot_{order_id}")
-            btn_random_bonus = types.InlineKeyboardButton("🎲 Рандомный бонус", callback_data=f"admin_random_bonus_{order_id}")
             btn_back = types.InlineKeyboardButton("↩️ Назад", callback_data="admin_orders")
             keyboard.add(btn_confirm, btn_cancel)
-            keyboard.add(btn_screenshot, btn_random_bonus)
+            keyboard.add(btn_screenshot)
             keyboard.add(btn_back)
             try:
                 bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=keyboard)
@@ -2694,43 +2410,6 @@ def callback_handler(call):
             except Exception as e:
                 logger.error(f"Ошибка отправки скриншота: {e}")
                 bot.answer_callback_query(call.id, "❌ Ошибка при отправке скрина", show_alert=True)
-            return
-
-        # ====== РАНДОМНЫЙ БОНУС ДЛЯ ЗАКАЗА ======
-        if call.data.startswith("admin_random_bonus_"):
-            order_id = int(call.data.split("_")[3])
-            order = db.get_order(order_id)
-            if not order:
-                bot.answer_callback_query(call.id, "❌ Заказ не найден")
-                return
-            if order['status'] != 'pending':
-                bot.answer_callback_query(call.id, "❌ Бонус можно выдать только для ожидающего заказа!", show_alert=True)
-                return
-            # Генерируем бонус до 5% от суммы заказа (amount – в USD или RUB?)
-            # Для рублёвых заказов берём gmp_amount, так как бонус в GMP
-            # Для крипто-заказов тоже gmp_amount
-            gmp_amount = order['gmp_amount']
-            if gmp_amount <= 0:
-                bot.answer_callback_query(call.id, "❌ Некорректная сумма заказа", show_alert=True)
-                return
-            percent = random.uniform(0, 5)
-            bonus = gmp_amount * (percent / 100)
-            if bonus < 0.01:
-                bot.answer_callback_query(call.id, f"🎲 Бонус составил {percent:.1f}%, но это меньше 0.01 GMP, не начислен.", show_alert=True)
-                return
-            db.update_bonus_balance(order['user_id'], bonus, f"Рандомный бонус ивента: +{bonus:.2f} GMP ({percent:.1f}%)")
-            bot.answer_callback_query(call.id, f"✅ Выдан рандомный бонус: {bonus:.2f} GMP ({percent:.1f}%)", show_alert=True)
-            # Уведомляем пользователя
-            try:
-                bot.send_message(
-                    order['user_id'],
-                    f"🎲 <b>Вам выдан рандомный бонус!</b>\n"
-                    f"💰 +{bonus:.2f} GMP ({percent:.1f}% от суммы покупки)\n"
-                    "Бонус зачислен на бонусный баланс.",
-                    parse_mode="HTML"
-                )
-            except:
-                pass
             return
 
     # ========== АДМИН: ЗАЯВКИ НА ВЫВОД ==========
@@ -2831,7 +2510,7 @@ def callback_handler(call):
         bot.register_next_step_handler(call.message, handle_broadcast)
         return
 
-    # ========== АДМИН: ПОДТВЕРЖДЕНИЕ ЗАЯВОК ==========
+    # ========== АДМИН: ПОДТВЕРЖДЕНИЕ ЗАЯВОК (С НАЧИСЛЕНИЕМ КЕШБЭКА) ==========
     if call.data.startswith("admin_confirm_"):
         order_id = int(call.data.split("_")[2])
         order = db.get_order(order_id)
@@ -2884,7 +2563,7 @@ def callback_handler(call):
             )
             return
 
-        # Обычная покупка GMP
+        # Обычная покупка GMP (рубли)
         if Config.TOTAL_GMP_AVAILABLE < order['gmp_amount']:
             bot.answer_callback_query(call.id, f"❌ Недостаточно GMP на складе! Доступно: {Config.TOTAL_GMP_AVAILABLE:.0f}", show_alert=True)
             return
@@ -2900,6 +2579,18 @@ def callback_handler(call):
         new_available = Config.TOTAL_GMP_AVAILABLE - order['gmp_amount']
         db.set_setting('TOTAL_GMP_AVAILABLE', new_available)
         sync_config_from_db()
+
+        # Начисление кешбэка
+        amount_rub = order['amount']  # сумма в рублях
+        cashback_percent = calculate_cashback(amount_rub)
+        # Кешбэк в GMP: (сумма_руб * процент / 100) / цена_за_GMP
+        cashback_gmp = (amount_rub * cashback_percent / 100) / Config.PRICE_PER_GMP_RUB
+        if cashback_gmp > 0:
+            db.update_bonus_balance(user_id_order, cashback_gmp, f"Кешбэк: +{cashback_gmp:.2f} GMP")
+            db.add_cashback(user_id_order, cashback_gmp)
+            logger.info(f"Начислен кешбэк {cashback_gmp:.2f} GMP пользователю {user_id_order}")
+
+        # Реферальный бонус
         if user and user['referrer_id']:
             referrer_id = user['referrer_id']
             referral_percent = Config.REFERRAL_PERCENT
@@ -2917,27 +2608,6 @@ def callback_handler(call):
                 except:
                     pass
 
-        # ---- ИВЕНТ ----
-        if db.is_event_active():
-            # Бонус 7%
-            event_bonus_percent = db.get_event_bonus_percent()
-            extra_bonus = order['gmp_amount'] * (event_bonus_percent / 100)
-            if extra_bonus > 0:
-                db.update_bonus_balance(user_id_order, extra_bonus, f"Бонус ивента 7%: +{extra_bonus:.2f} GMP")
-            # Задания
-            task_bonuses = db.update_event_progress(user_id_order, order['gmp_amount'])
-            if task_bonuses:
-                task_text = ", ".join([f"+{b} GMP" for b in task_bonuses])
-                try:
-                    bot.send_message(
-                        user_id_order,
-                        f"🎉 <b>Вы выполнили задание ивента!</b>\n"
-                        f"Получено: {task_text}",
-                        parse_mode="HTML"
-                    )
-                except:
-                    pass
-
         admin_msg_id = order['admin_message_id'] if order['admin_message_id'] else None
         if admin_msg_id:
             safe_delete_message(Config.ADMIN_ID, admin_msg_id)
@@ -2949,6 +2619,7 @@ def callback_handler(call):
                 text = (
                     f"✅ <b>Заявка #{order_id} одобрена!</b>\n\n"
                     f"💎 Куплено: <b>{order['gmp_amount']:.0f} GMP</b>\n"
+                    f"💰 Кешбэк: <b>{cashback_gmp:.2f} GMP</b> ({cashback_percent}%)\n"
                     "❤️ Спасибо за покупку!"
                 )
                 bot.send_message(user_id_order, text, parse_mode="HTML")
@@ -2960,7 +2631,8 @@ def callback_handler(call):
             call.message.message_id,
             f"✅ <b>Заявка #{order_id} выполнена</b>\n{divider()}\n"
             f"💎 Продано: <b>{order['gmp_amount']:.0f} GMP</b>\n"
-            f"👤 Покупатель: {username}",
+            f"👤 Покупатель: {username}\n"
+            f"💰 Кешбэк: {cashback_gmp:.2f} GMP",
             parse_mode="HTML",
             reply_markup=back_to_main_keyboard()
         )
@@ -3071,80 +2743,6 @@ def callback_handler(call):
 
 
 # ========== ОБРАБОТЧИКИ ВВОДА ==========
-
-# ----- АДМИН: НАСТРОЙКА ИВЕНТА -----
-def handle_admin_event_settings(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    if not is_admin(user_id):
-        return
-    try:
-        choice = int(message.text.strip())
-        if choice not in [1, 2]:
-            raise ValueError
-    except:
-        bot.send_message(chat_id, "❌ Введите 1 или 2.", parse_mode="HTML")
-        return
-    if choice == 1:
-        msg = bot.send_message(
-            chat_id,
-            f"Текущий бонусный процент: {db.get_event_bonus_percent()}%\nВведите новый процент:",
-            parse_mode="HTML",
-            reply_markup=back_to_main_keyboard()
-        )
-        bot.register_next_step_handler(msg, handle_admin_event_bonus_percent)
-    elif choice == 2:
-        msg = bot.send_message(
-            chat_id,
-            "Введите задания в формате: порог:бонус, порог:бонус, ...\n"
-            "Пример: 1000:77, 2000:170, 6000:500, 10000:999\n\n"
-            "Текущие задания:\n" + "\n".join([f"   {t['threshold']} → +{t['bonus']}" for t in db.get_event_tasks()]),
-            parse_mode="HTML",
-            reply_markup=back_to_main_keyboard()
-        )
-        bot.register_next_step_handler(msg, handle_admin_event_tasks)
-    else:
-        bot.send_message(chat_id, "❌ Неверный выбор.", parse_mode="HTML")
-
-def handle_admin_event_bonus_percent(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    if not is_admin(user_id):
-        return
-    try:
-        percent = float(message.text.strip())
-        if percent < 0:
-            raise ValueError
-        db.set_event_bonus_percent(percent)
-        sync_config_from_db()
-        bot.send_message(chat_id, f"✅ Бонусный процент ивента установлен: {percent}%", parse_mode="HTML")
-        show_main_menu(chat_id)
-    except:
-        bot.send_message(chat_id, "❌ Некорректное значение.", parse_mode="HTML")
-
-def handle_admin_event_tasks(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    if not is_admin(user_id):
-        return
-    try:
-        parts = [p.strip() for p in message.text.split(',')]
-        tasks = []
-        for part in parts:
-            threshold_str, bonus_str = part.split(':')
-            threshold = float(threshold_str)
-            bonus = float(bonus_str)
-            if threshold <= 0 or bonus <= 0:
-                raise ValueError
-            tasks.append({"threshold": threshold, "bonus": bonus})
-        if not tasks:
-            raise ValueError
-        db.set_event_tasks(tasks)
-        sync_config_from_db()
-        bot.send_message(chat_id, "✅ Задания ивента обновлены!", parse_mode="HTML")
-        show_main_menu(chat_id)
-    except Exception as e:
-        bot.send_message(chat_id, f"❌ Ошибка формата: {e}\nИспользуйте формат: 1000:77, 2000:170, ...", parse_mode="HTML")
 
 # ----- АДМИН: НАСТРОЙКА ПЛАТНОГО КЕЙСА -----
 def handle_admin_paid_case_settings(message):
@@ -3303,8 +2901,8 @@ def handle_admin_settings_choice(message):
         5: ('MIN_REFERRALS_FOR_WITHDRAW', 'Кол-во рефералов для вывода', 'целое число', int),
         6: ('REFERRAL_PERCENT', '% реферальных начислений', 'число', float),
         7: ('CASE_COOLDOWN_MINUTES', 'Время кулдауна бесплатного кейса (мин)', 'число', float),
-        8: ('MIN_CASE_REWARD', 'Мин. награда бесплатного кейса (GMP)', 'число', float),
-        9: ('MAX_CASE_REWARD', 'Макс. награда бесплатного кейса (GMP)', 'число', float),
+        8: ('MIN_CASE_REWARD', 'Мин. награда бесплатного кейса (GMP)', 'целое число', int),
+        9: ('MAX_CASE_REWARD', 'Макс. награда бесплатного кейса (GMP)', 'целое число', int),
         10: ('TOTAL_GMP_AVAILABLE', 'Доступно GMP', 'число', float),
         11: ('CRYPTO_RATE', 'Курс USDT (GMP за 1 USD)', 'число', float),
         12: ('CRYPTO_ASSET', 'Актив USDT (например USDT)', 'строка', str),
@@ -3337,6 +2935,8 @@ def handle_admin_settings_value(message, key, conv, desc):
             new_val = conv(message.text.strip())
             if new_val < 0:
                 raise ValueError
+            if key in ('MIN_CASE_REWARD', 'MAX_CASE_REWARD'):
+                new_val = int(new_val)
     except:
         bot.send_message(chat_id, f"❌ Некорректное значение. Введите положительное {desc}.", parse_mode="HTML")
         return
@@ -3863,7 +3463,6 @@ if __name__ == "__main__":
     print(f"🎯 Бесплатный кейс: {Config.MIN_CASE_REWARD}-{Config.MAX_CASE_REWARD} GMP")
     print(f"👥 Рефералов для вывода: {Config.MIN_REFERRALS_FOR_WITHDRAW}")
     print(f"📦 Доступно GMP: {Config.TOTAL_GMP_AVAILABLE:.0f}")
-    print(f"🎉 Ивент активен: {'Да' if db.is_event_active() else 'Нет'}")
     print("=" * 60)
     print("🔄 Бот запущен и готов к работе!")
     print("=" * 60)
