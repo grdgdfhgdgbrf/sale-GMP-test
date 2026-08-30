@@ -21,8 +21,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-BOT_TOKEN = "YOUR_BOT_TOKEN"  # Замените на ваш токен
-ADMIN_IDS = [123456789]  # Замените на ID администраторов
+BOT_TOKEN = "8996813076:AAFJDSnIDWG5xG5dpQA_VyJjqWBZD0r-bIA"  # Замените на ваш токен
+ADMIN_IDS = [5356400377]  # Замените на ID администраторов
 
 # База данных
 class Database:
